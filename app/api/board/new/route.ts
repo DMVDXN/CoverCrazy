@@ -12,7 +12,7 @@ type FilledAlbum = {
 };
 
 type BoardSquare = {
-  position: number; // 0..24
+  position: number;
   promptKey: string;
   promptText: string;
   fill: FilledAlbum | null;
@@ -23,9 +23,9 @@ type BoardMode = "solo" | "shared" | "daily";
 type BingoBoard = {
   id: string;
   mode: BoardMode;
-  size: number; // 5
+  size: number; // dimension, ex: 5
   seed: string;
-  dailyDate: string | null; // YYYY-MM-DD when mode=daily
+  dailyDate: string | null;
   squares: BoardSquare[];
 };
 
@@ -33,24 +33,9 @@ function supabaseAdmin() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!url || !key) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  }
+  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
 
-  return createClient(url, key, {
-    auth: { persistSession: false },
-  });
-}
-
-function shuffle<T>(arr: T[]) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const tmp = a[i];
-    a[i] = a[j];
-    a[j] = tmp;
-  }
-  return a;
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 function toISODateOnly(d: Date) {
@@ -62,16 +47,45 @@ function toISODateOnly(d: Date) {
 
 function normalizeMode(input: unknown): BoardMode {
   const v = String(input ?? "").trim().toLowerCase();
-
-  // Back-compat with your earlier naming
   if (v === "live" || v === "party") return "shared";
-
   if (v === "shared") return "shared";
   if (v === "daily") return "daily";
   return "solo";
 }
 
-function buildSquares(seed: string): BoardSquare[] {
+function hashSeedToInt(seed: string) {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleSeeded<T>(arr: T[], seedStr: string) {
+  const a = [...arr];
+  const rand = mulberry32(hashSeedToInt(seedStr) || 1);
+
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const tmp = a[i];
+    a[i] = a[j];
+    a[j] = tmp;
+  }
+
+  return a;
+}
+
+function buildSquares(seed: string, size: number): BoardSquare[] {
   const list = Array.isArray(PROMPTS) ? PROMPTS : [];
 
   const fallback = [
@@ -112,17 +126,19 @@ function buildSquares(seed: string): BoardSquare[] {
           .filter((p) => p.key && p.text)
       : fallback;
 
-  const picked = shuffle(normalized);
+  const dim = Number(size) || 5;
+  const total = dim * dim;
 
-  const twentyFive: { key: string; text: string }[] = [];
+  const picked = shuffleSeeded(normalized, seed);
+
+  const chosen: { key: string; text: string }[] = [];
   let idx = 0;
-
-  while (twentyFive.length < 25) {
-    twentyFive.push(picked[idx % picked.length]);
+  while (chosen.length < total) {
+    chosen.push(picked[idx % picked.length]);
     idx++;
   }
 
-  return twentyFive.map((p, i) => ({
+  return chosen.map((p, i) => ({
     position: i,
     promptKey: p.key,
     promptText: p.text,
@@ -134,11 +150,9 @@ async function createBoard(mode: BoardMode) {
   const sb = supabaseAdmin();
 
   const id = crypto.randomUUID();
-  const size = 5;
-
-  const dailyDate = mode === "daily" ? toISODateOnly(new Date()) : null;
-
+  const size = 5; // dimension
   const seed = crypto.randomUUID();
+  const dailyDate = mode === "daily" ? toISODateOnly(new Date()) : null;
 
   const board: BingoBoard = {
     id,
@@ -146,58 +160,63 @@ async function createBoard(mode: BoardMode) {
     size,
     seed,
     dailyDate,
-    squares: buildSquares(seed),
+    squares: buildSquares(seed, size),
   };
 
   const insertPayload: Record<string, any> = {
     id,
-    mode, // must be one of: 'solo' | 'shared' | 'daily'
+    mode,
     size,
     seed,
     data: board,
   };
-
   if (dailyDate) insertPayload.daily_date = dailyDate;
 
-  const { error } = await sb.from("boards").insert(insertPayload);
+  const { error: boardErr } = await sb.from("boards").insert(insertPayload);
+  if (boardErr) throw new Error(boardErr.message);
 
-  if (error) {
-    throw new Error(error.message);
+  const squaresRows = board.squares.map((s) => ({
+    board_id: id,
+    position: s.position,
+    prompt_key: s.promptKey,
+    prompt_text: s.promptText,
+    fill: null,
+    filled_by: null,
+    filled_at: null,
+  }));
+
+  const { error: sqErr } = await sb
+    .from("board_squares")
+    .upsert(squaresRows, { onConflict: "board_id,position" });
+
+  if (sqErr) {
+    await sb.from("boards").delete().eq("id", id);
+    throw new Error(sqErr.message);
   }
 
   return board;
 }
 
 // GET /api/board/new?mode=solo|shared|daily
-// (also accepts legacy ?mode=live or ?mode=party and maps them to shared)
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const mode = normalizeMode(url.searchParams.get("mode"));
-
     const board = await createBoard(mode);
     return NextResponse.json({ id: board.id, board }, { status: 201 });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Failed to create board" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || "Failed to create board" }, { status: 500 });
   }
 }
 
 // POST /api/board/new with body: { "mode": "solo" | "shared" | "daily" }
-// (also accepts legacy "live" or "party" and maps them to "shared")
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const mode = normalizeMode(body?.mode);
-
     const board = await createBoard(mode);
     return NextResponse.json({ id: board.id, board }, { status: 201 });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || "Failed to create board" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || "Failed to create board" }, { status: 500 });
   }
 }
