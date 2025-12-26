@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
-import type { BingoBoard, SpotifyAlbumDetails } from "@/lib/types";
+import { useParams, useRouter } from "next/navigation";
 import { validatePrompt } from "@/lib/rules";
 
-type AlbumResult = {
+type FilledAlbum = {
   id: string;
   name: string;
   artistName: string;
@@ -13,611 +12,538 @@ type AlbumResult = {
   spotifyUrl: string | null;
 };
 
-type BingoResult = {
-  hasBingo: boolean;
-  winningPositions: number[];
+type AlbumDetails = FilledAlbum & {
+  releaseDate?: string | null;
+  totalTracks?: number | null;
+  albumType?: string | null;
 };
 
-function posToRowCol(pos: number) {
-  return { row: Math.floor(pos / 5), col: pos % 5 };
+type BoardSquare = {
+  position: number;
+  promptKey: string;
+  promptText: string;
+  fill: FilledAlbum | null;
+};
+
+type BingoBoard = {
+  id: string;
+  mode: "party" | "daily";
+  squares: BoardSquare[];
+};
+
+type RuleResult = { ok: boolean; reason: string };
+
+function idxToRowCol(i: number) {
+  return { row: Math.floor(i / 5), col: i % 5 };
 }
 
-function computeBingo(board: BingoBoard | null): BingoResult {
-  if (!board) return { hasBingo: false, winningPositions: [] };
-  const size = board.size || 5;
-
-  const filled = new Set<number>();
-  for (const sq of board.squares) {
-    if (sq.fill) filled.add(sq.position);
-  }
-
-  const lines: number[][] = [];
-
-  for (let r = 0; r < size; r++) {
-    const row: number[] = [];
-    for (let c = 0; c < size; c++) row.push(r * size + c);
-    lines.push(row);
-  }
-
-  for (let c = 0; c < size; c++) {
-    const col: number[] = [];
-    for (let r = 0; r < size; r++) col.push(r * size + c);
-    lines.push(col);
-  }
-
-  const diag1: number[] = [];
-  for (let i = 0; i < size; i++) diag1.push(i * size + i);
-  lines.push(diag1);
-
-  const diag2: number[] = [];
-  for (let i = 0; i < size; i++) diag2.push(i * size + (size - 1 - i));
-  lines.push(diag2);
-
-  for (const line of lines) {
-    const ok = line.every((pos) => filled.has(pos));
-    if (ok) return { hasBingo: true, winningPositions: line };
-  }
-
-  return { hasBingo: false, winningPositions: [] };
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
 export default function BoardPage() {
   const params = useParams();
-  const boardId = (params?.id as string) || "";
+  const router = useRouter();
 
+  const rawId = (params as any)?.id;
+  const boardId = typeof rawId === "string" ? rawId : "";
+
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState("");
   const [board, setBoard] = useState<BingoBoard | null>(null);
 
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [activePos, setActivePos] = useState<number | null>(null);
+  const [modalOpen, setModalOpen] = useState(false);
 
   const [q, setQ] = useState("");
-  const [results, setResults] = useState<AlbumResult[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const [validatingPick, setValidatingPick] = useState(false);
-  const [pickError, setPickError] = useState<string | null>(null);
-
-  const [bingo, setBingo] = useState<BingoResult>({ hasBingo: false, winningPositions: [] });
-  const [showBingoBanner, setShowBingoBanner] = useState(false);
-
-  useEffect(() => {
-    if (!boardId) return;
-
-    const raw = localStorage.getItem(`covercrazy:board:${boardId}`);
-    if (!raw) {
-      setBoard(null);
-      return;
-    }
-
-    try {
-      const parsed = JSON.parse(raw);
-      setBoard(parsed);
-    } catch {
-      setBoard(null);
-    }
-  }, [boardId]);
-
-  useEffect(() => {
-    const r = computeBingo(board);
-    setBingo(r);
-
-    if (r.hasBingo) {
-      setShowBingoBanner(true);
-      const t = setTimeout(() => setShowBingoBanner(false), 3500);
-      return () => clearTimeout(t);
-    }
-  }, [board]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [albums, setAlbums] = useState<FilledAlbum[]>([]);
 
   const squares = useMemo(() => {
     if (!board) return [];
     return [...board.squares].sort((a, b) => a.position - b.position);
   }, [board]);
 
-  function saveBoard(next: BingoBoard) {
-    setBoard(next);
-    localStorage.setItem(`covercrazy:board:${next.id}`, JSON.stringify(next));
-  }
-
-  function openPicker(pos: number) {
-    setActivePos(pos);
-    setPickerOpen(true);
-    setQ("");
-    setResults([]);
-    setErr(null);
-    setLoading(false);
-    setPickError(null);
-    setValidatingPick(false);
-  }
-
-  function closePicker() {
-    setPickerOpen(false);
-    setActivePos(null);
-    setQ("");
-    setResults([]);
-    setErr(null);
-    setLoading(false);
-    setPickError(null);
-    setValidatingPick(false);
-  }
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, [pickerOpen]);
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-
-    const query = q.trim();
-    if (!query) {
-      setResults([]);
-      setErr(null);
+  async function loadBoard() {
+    if (!boardId) {
       setLoading(false);
+      setBoard(null);
+      setErrorMsg("Missing board id.");
+      return;
+    }
+
+    if (!isUuid(boardId)) {
+      setLoading(false);
+      setBoard(null);
+      setErrorMsg("Invalid board id.");
+      return;
+    }
+
+    setLoading(true);
+    setErrorMsg("");
+
+    try {
+      const res = await fetch(`/api/board/${encodeURIComponent(boardId)}`, {
+        cache: "no-store",
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        setBoard(null);
+        setErrorMsg(typeof data?.error === "string" ? data.error : `Failed to load board: ${res.status}`);
+        setLoading(false);
+        return;
+      }
+
+      const b = (data?.board ?? data) as BingoBoard;
+
+      if (!b || typeof b.id !== "string" || !Array.isArray((b as any).squares)) {
+        setBoard(null);
+        setErrorMsg("Board response was invalid.");
+        setLoading(false);
+        return;
+      }
+
+      const normalized: BingoBoard = {
+        id: b.id,
+        mode: (b.mode === "daily" ? "daily" : "party") as "party" | "daily",
+        squares: (b as any).squares as BoardSquare[],
+      };
+
+      setBoard(normalized);
+      setLoading(false);
+    } catch (e: any) {
+      setBoard(null);
+      setErrorMsg(e?.message || "Failed to load board.");
+      setLoading(false);
+    }
+  }
+
+  async function patchClear(position: number) {
+    const res = await fetch(`/api/board/${encodeURIComponent(boardId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "clear", position }),
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(typeof j?.error === "string" ? j.error : `Clear failed: ${res.status}`);
+    }
+  }
+
+  async function patchFill(position: number, fill: FilledAlbum) {
+    const res = await fetch(`/api/board/${encodeURIComponent(boardId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "fill", position, fill }),
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(typeof j?.error === "string" ? j.error : `Fill failed: ${res.status}`);
+    }
+  }
+
+  useEffect(() => {
+    loadBoard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boardId]);
+
+  useEffect(() => {
+    if (!modalOpen) return;
+
+    const trimmed = q.trim();
+    if (!trimmed) {
+      setAlbums([]);
+      setSearchError("");
+      setSearching(false);
       return;
     }
 
     const t = setTimeout(async () => {
-      setLoading(true);
-      setErr(null);
+      setSearching(true);
+      setSearchError("");
 
       try {
-        const res = await fetch(`/api/spotify/search?q=${encodeURIComponent(query)}`, {
-          cache: "no-store"
+        const res = await fetch(`/api/spotify/search?q=${encodeURIComponent(trimmed)}`, {
+          cache: "no-store",
         });
 
+        const data = await res.json().catch(() => ({}));
+
         if (!res.ok) {
-          setErr("Search failed.");
-          setResults([]);
+          setAlbums([]);
+          setSearchError(typeof data?.error === "string" ? data.error : "Search failed.");
+          setSearching(false);
           return;
         }
 
-        const data = await res.json();
-        setResults(data.albums || []);
-      } catch {
-        setErr("Search failed.");
-        setResults([]);
-      } finally {
-        setLoading(false);
+        setAlbums(Array.isArray(data?.albums) ? data.albums : []);
+        setSearching(false);
+      } catch (e: any) {
+        setAlbums([]);
+        setSearchError(e?.message || "Search failed.");
+        setSearching(false);
       }
     }, 250);
 
     return () => clearTimeout(t);
-  }, [q, pickerOpen]);
+  }, [q, modalOpen]);
 
-  async function pickAlbum(a: AlbumResult) {
+  function openPicker(position: number) {
+    setActivePos(position);
+    setModalOpen(true);
+    setQ("");
+    setAlbums([]);
+    setSearchError("");
+  }
+
+  function closePicker() {
+    setModalOpen(false);
+    setActivePos(null);
+    setQ("");
+    setAlbums([]);
+    setSearchError("");
+  }
+
+  async function clearSquare(position: number) {
     if (!board) return;
-    if (activePos === null) return;
+
+    setBoard({
+      ...board,
+      squares: board.squares.map((s) => (s.position === position ? { ...s, fill: null } : s)),
+    });
+
+    try {
+      await patchClear(position);
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Failed to clear.");
+      await loadBoard();
+    }
+  }
+
+  async function pickAlbum(albumId: string) {
+    if (!board || activePos === null) return;
 
     const sq = board.squares.find((s) => s.position === activePos);
     if (!sq) return;
 
-    setPickError(null);
-    setValidatingPick(true);
-
     try {
-      const detailsRes = await fetch(`/api/spotify/album?id=${encodeURIComponent(a.id)}`, {
-        cache: "no-store"
+      // IMPORTANT: this must match your route: app/api/spotify/albums/[id]/route.ts
+      const res = await fetch(`/api/spotify/albums/${encodeURIComponent(albumId)}`, {
+        cache: "no-store",
       });
 
-      if (!detailsRes.ok) {
-        setPickError("Could not validate this album. Try again.");
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || !data) {
+        const msg = (data as any)?.error;
+        setSearchError(typeof msg === "string" ? msg : `Failed to load album details (${res.status}).`);
         return;
       }
 
-      const details = (await detailsRes.json()) as SpotifyAlbumDetails;
-      const rule = validatePrompt(sq.promptKey, details);
+      const details = data as AlbumDetails;
 
+      if (!details?.id || !details?.name) {
+        setSearchError("Album details response was missing.");
+        return;
+      }
+
+      const rule: RuleResult = validatePrompt(sq.promptKey, details);
       if (!rule.ok) {
-        setPickError(rule.reason);
+        setSearchError(rule.reason);
         return;
       }
 
-      const next: BingoBoard = {
-        ...board,
-        squares: board.squares.map((s) => {
-          if (s.position !== activePos) return s;
-          return {
-            ...s,
-            fill: {
-              spotifyAlbumId: a.id,
-              albumName: details.name || a.name,
-              artistName: details.artistName || a.artistName,
-              imageUrl: details.imageUrl ?? a.imageUrl ?? null,
-              spotifyUrl: details.spotifyUrl ?? a.spotifyUrl ?? null
-            }
-          };
-        })
+      const fill: FilledAlbum = {
+        id: details.id,
+        name: details.name,
+        artistName: details.artistName,
+        imageUrl: details.imageUrl ?? null,
+        spotifyUrl: details.spotifyUrl ?? null,
       };
 
-      saveBoard(next);
+      setBoard({
+        ...board,
+        squares: board.squares.map((s) => (s.position === activePos ? { ...s, fill } : s)),
+      });
+
       closePicker();
-    } catch {
-      setPickError("Could not validate this album. Try again.");
-    } finally {
-      setValidatingPick(false);
+
+      await patchFill(activePos, fill);
+    } catch (e: any) {
+      setSearchError(e?.message || "Failed to pick album.");
+      await loadBoard();
     }
   }
 
-  function clearSquare(pos: number) {
-    if (!board) return;
-
-    const next: BingoBoard = {
-      ...board,
-      squares: board.squares.map((sq) => {
-        if (sq.position !== pos) return sq;
-        return { position: sq.position, promptKey: sq.promptKey, promptText: sq.promptText };
-      })
-    };
-
-    saveBoard(next);
-  }
-
-  if (!board) {
+  if (loading) {
     return (
-      <main style={{ minHeight: "100vh", background: "#0b0f19", color: "white", padding: 28 }}>
-        <div style={{ maxWidth: 900, margin: "0 auto" }}>
-          <h1 style={{ fontSize: 34, fontWeight: 900, margin: 0 }}>Cover Crazy</h1>
-          <p style={{ marginTop: 10, opacity: 0.75 }}>
-            Board not found. Go back to the home page and create a new board.
-          </p>
-        </div>
+      <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+        <h1 style={{ fontSize: 32, fontWeight: 900 }}>Cover Crazy</h1>
+        <p style={{ marginTop: 12, opacity: 0.8 }}>Loading board...</p>
       </main>
     );
   }
 
-  const winningSet = new Set(bingo.winningPositions);
+  if (!board) {
+    return (
+      <main style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+        <h1 style={{ fontSize: 32, fontWeight: 900 }}>Cover Crazy</h1>
+        <p style={{ marginTop: 12, opacity: 0.8 }}>Board not found. Go back and create a new one.</p>
+
+        {errorMsg ? (
+          <pre style={{ marginTop: 12, color: "#ff6b6b", whiteSpace: "pre-wrap" }}>{errorMsg}</pre>
+        ) : null}
+
+        <button
+          onClick={() => router.push("/")}
+          style={{
+            marginTop: 16,
+            padding: "10px 14px",
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.16)",
+            background: "rgba(255,255,255,0.08)",
+            color: "white",
+            cursor: "pointer",
+          }}
+        >
+          Back
+        </button>
+      </main>
+    );
+  }
 
   return (
-    <main style={{ minHeight: "100vh", background: "#0b0f19", color: "white", padding: 28 }}>
-      {showBingoBanner ? (
-        <div
-          style={{
-            position: "fixed",
-            top: 16,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1200,
-            padding: "12px 16px",
-            borderRadius: 999,
-            border: "1px solid rgba(255,255,255,0.18)",
-            background: "rgba(15,21,36,0.95)",
-            boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
-            fontWeight: 900
-          }}
-        >
-          Bingo!
-        </div>
-      ) : null}
+    <main style={{ maxWidth: 1200, margin: "0 auto", padding: 24 }}>
+      <header style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+        <h1 style={{ fontSize: 40, fontWeight: 900, margin: 0 }}>Cover Crazy</h1>
+        <span style={{ opacity: 0.65, fontSize: 14 }}>
+          Board: {board.id} ({board.mode})
+        </span>
+      </header>
 
-      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-        <header style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
-          <h1 style={{ fontSize: 44, fontWeight: 900, margin: 0 }}>Cover Crazy</h1>
-          <div style={{ opacity: 0.7, fontSize: 14 }}>Board: {board.id}</div>
+      {errorMsg ? <div style={{ marginTop: 12, color: "#ff6b6b" }}>{errorMsg}</div> : null}
 
-          {bingo.hasBingo ? (
-            <div style={{ marginLeft: "auto", fontWeight: 900, opacity: 0.95 }}>Bingo achieved</div>
-          ) : (
-            <div style={{ marginLeft: "auto", opacity: 0.7 }}>Real mode on</div>
-          )}
-        </header>
+      <div
+        style={{
+          marginTop: 18,
+          display: "grid",
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+          gap: 14,
+        }}
+      >
+        {squares.map((sq) => {
+          const { row, col } = idxToRowCol(sq.position);
+          const filled = !!sq.fill;
 
-        <div
-          style={{
-            marginTop: 18,
-            display: "grid",
-            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
-            gap: 18
-          }}
-        >
-          {squares.map((sq) => {
-            const { row, col } = posToRowCol(sq.position);
-            const isWinning = winningSet.has(sq.position);
-
-            return (
-              <div
-                key={sq.position}
-                role="button"
-                tabIndex={0}
-                onClick={() => openPicker(sq.position)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") openPicker(sq.position);
-                }}
-                style={{
-                  borderRadius: 18,
-                  border: isWinning ? "2px solid rgba(255,255,255,0.55)" : "1px solid rgba(255,255,255,0.12)",
-                  background: isWinning ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.06)",
-                  padding: 16,
-                  minHeight: 140,
-                  cursor: "pointer",
-                  position: "relative",
-                  overflow: "hidden",
-                  outline: "none",
-                  boxShadow: "0 16px 40px rgba(0,0,0,0.28)"
-                }}
-              >
-                {sq.fill?.imageUrl ? (
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      backgroundImage: `url(${sq.fill.imageUrl})`,
-                      backgroundSize: "cover",
-                      backgroundPosition: "center",
-                      transform: "scale(1.03)",
-                      zIndex: 1
-                    }}
-                  />
-                ) : null}
-
-                {sq.fill?.imageUrl ? (
-                  <div
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      background:
-                        "linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0.18) 40%, rgba(0,0,0,0.88))",
-                      zIndex: 2
-                    }}
-                  />
-                ) : null}
-
-                <div
+          return (
+            <div
+              key={sq.position}
+              onClick={() => {
+                if (!filled) openPicker(sq.position);
+              }}
+              style={{
+                position: "relative",
+                borderRadius: 18,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: filled ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.04)",
+                color: "white",
+                padding: 14,
+                minHeight: 130,
+                cursor: filled ? "default" : "pointer",
+                overflow: "hidden",
+              }}
+            >
+              {sq.fill?.imageUrl ? (
+                <img
+                  src={sq.fill.imageUrl}
+                  alt=""
                   style={{
-                    position: "relative",
-                    zIndex: 3,
-                    display: "flex",
-                    flexDirection: "column",
-                    height: "100%"
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    opacity: 0.28,
                   }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
-                    <div style={{ fontSize: 12, opacity: sq.fill ? 0.85 : 0.65 }}>
-                      {row + 1},{col + 1}
-                    </div>
+                />
+              ) : null}
 
-                    {sq.fill ? (
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          clearSquare(sq.position);
-                        }}
-                        style={{
-                          padding: "6px 10px",
-                          borderRadius: 999,
-                          border: "1px solid rgba(255,255,255,0.22)",
-                          background: "rgba(0,0,0,0.55)",
-                          color: "white",
-                          cursor: "pointer",
-                          fontWeight: 900,
-                          fontSize: 12
-                        }}
-                      >
-                        Clear
-                      </button>
-                    ) : null}
-                  </div>
-
-                  <div style={{ marginTop: 10, fontWeight: 900, fontSize: 16, lineHeight: 1.15 }}>
-                    {sq.promptText}
-                  </div>
-
-                  {!sq.fill ? (
-                    <div style={{ marginTop: 10, fontSize: 12, opacity: 0.65 }}>
-                      Click to add an album
-                    </div>
-                  ) : null}
-
-                  {sq.fill ? (
-                    <div style={{ marginTop: "auto" }}>
-                      <div
-                        style={{
-                          fontWeight: 900,
-                          fontSize: 14,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis"
-                        }}
-                      >
-                        {sq.fill.albumName}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          opacity: 0.85,
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis"
-                        }}
-                      >
-                        {sq.fill.artistName}
-                      </div>
-                    </div>
-                  ) : null}
+              <div style={{ position: "relative" }}>
+                <div style={{ fontSize: 12, opacity: 0.7 }}>
+                  {row + 1},{col + 1}
                 </div>
+
+                <div style={{ marginTop: 6, fontSize: 18, fontWeight: 800 }}>{sq.promptText}</div>
+
+                {!sq.fill ? (
+                  <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>Click to add an album</div>
+                ) : (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 14, fontWeight: 800 }}>{sq.fill.name}</div>
+                    <div style={{ fontSize: 12, opacity: 0.85 }}>{sq.fill.artistName}</div>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        clearSquare(sq.position);
+                      }}
+                      style={{
+                        marginTop: 10,
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: "1px solid rgba(255,255,255,0.16)",
+                        background: "rgba(0,0,0,0.22)",
+                        color: "white",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
       </div>
 
-      {pickerOpen ? (
+      {modalOpen ? (
         <div
           onClick={closePicker}
           style={{
             position: "fixed",
             inset: 0,
-            zIndex: 1000,
-            background: "rgba(0,0,0,0.72)",
-            backdropFilter: "blur(8px)",
+            background: "rgba(0,0,0,0.55)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 18
+            padding: 18,
+            zIndex: 50,
           }}
         >
           <div
-            role="dialog"
-            aria-modal="true"
             onClick={(e) => e.stopPropagation()}
             style={{
-              width: "min(920px, 100%)",
-              maxHeight: "min(80vh, 720px)",
-              display: "flex",
-              flexDirection: "column",
+              width: "min(900px, 96vw)",
               borderRadius: 18,
               border: "1px solid rgba(255,255,255,0.14)",
-              background: "#0f1524",
-              boxShadow: "0 30px 90px rgba(0,0,0,0.65)",
+              background: "rgba(10,14,22,0.92)",
               color: "white",
-              overflow: "hidden"
+              padding: 16,
             }}
           >
-            <div style={{ padding: 16, borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                <div style={{ fontWeight: 900, fontSize: 16 }}>Search Spotify albums</div>
-                <button
-                  type="button"
-                  onClick={closePicker}
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 12,
-                    border: "1px solid rgba(255,255,255,0.16)",
-                    background: "rgba(255,255,255,0.06)",
-                    color: "white",
-                    cursor: "pointer",
-                    fontWeight: 900
-                  }}
-                >
-                  Close
-                </button>
-              </div>
-
-              <input
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                placeholder="Type an album name..."
-                autoFocus
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>Search Spotify albums</div>
+              <button
+                onClick={closePicker}
                 style={{
-                  marginTop: 12,
-                  width: "100%",
-                  padding: "12px 12px",
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,0.18)",
-                  background: "rgba(255,255,255,0.10)",
+                  padding: "8px 12px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  background: "rgba(255,255,255,0.08)",
                   color: "white",
-                  outline: "none"
-                }}
-              />
-
-              <div style={{ marginTop: 10, fontSize: 13, opacity: 0.9 }}>
-                {validatingPick ? "Validating pick..." : loading ? "Searching..." : err ? err : results.length ? "Pick one:" : "Start typing to search"}
-              </div>
-
-              {pickError ? (
-                <div
-                  style={{
-                    marginTop: 10,
-                    padding: "10px 12px",
-                    borderRadius: 14,
-                    border: "1px solid rgba(255,255,255,0.18)",
-                    background: "rgba(255,70,70,0.18)",
-                    color: "white",
-                    fontSize: 13,
-                    fontWeight: 800
-                  }}
-                >
-                  Not allowed: {pickError}
-                </div>
-              ) : null}
-            </div>
-
-            <div style={{ padding: 16, overflowY: "auto" }}>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-                  gap: 12
+                  cursor: "pointer",
                 }}
               >
-                {results.map((a) => (
-                  <button
-                    type="button"
-                    key={a.id}
-                    onClick={() => pickAlbum(a)}
-                    disabled={validatingPick}
+                Close
+              </button>
+            </div>
+
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Type an album name..."
+              style={{
+                marginTop: 12,
+                width: "100%",
+                padding: "12px 14px",
+                borderRadius: 14,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(255,255,255,0.06)",
+                color: "white",
+                outline: "none",
+              }}
+            />
+
+            {searching ? <div style={{ marginTop: 10, opacity: 0.75 }}>Searching...</div> : null}
+            {searchError ? <div style={{ marginTop: 10, color: "#ff6b6b" }}>{searchError}</div> : null}
+
+            <div
+              style={{
+                marginTop: 14,
+                display: "grid",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: 12,
+              }}
+            >
+              {albums.map((a) => (
+                <div
+                  key={a.id}
+                  onClick={() => pickAlbum(a.id)}
+                  style={{
+                    borderRadius: 16,
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    background: "rgba(255,255,255,0.05)",
+                    padding: 12,
+                    cursor: "pointer",
+                    display: "flex",
+                    gap: 10,
+                    alignItems: "center",
+                  }}
+                >
+                  <div
                     style={{
-                      display: "flex",
-                      gap: 12,
-                      alignItems: "center",
-                      textAlign: "left",
-                      padding: 12,
-                      borderRadius: 16,
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      background: "rgba(255,255,255,0.06)",
-                      color: "white",
-                      cursor: validatingPick ? "not-allowed" : "pointer",
-                      opacity: validatingPick ? 0.65 : 1
+                      width: 56,
+                      height: 56,
+                      borderRadius: 12,
+                      overflow: "hidden",
+                      background: "rgba(255,255,255,0.08)",
+                      flex: "0 0 auto",
                     }}
                   >
                     {a.imageUrl ? (
-                      <img
-                        src={a.imageUrl}
-                        alt={`${a.name} cover`}
-                        style={{ width: 58, height: 58, borderRadius: 14, objectFit: "cover" }}
-                      />
-                    ) : (
-                      <div
-                        style={{
-                          width: 58,
-                          height: 58,
-                          borderRadius: 14,
-                          border: "1px solid rgba(255,255,255,0.12)",
-                          background: "rgba(0,0,0,0.2)"
-                        }}
-                      />
-                    )}
+                      <img src={a.imageUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    ) : null}
+                  </div>
 
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        style={{
-                          fontWeight: 900,
-                          fontSize: 13,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap"
-                        }}
-                      >
-                        {a.name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 12,
-                          opacity: 0.85,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap"
-                        }}
-                      >
-                        {a.artistName}
-                      </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontWeight: 900,
+                        fontSize: 13,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {a.name}
                     </div>
-                  </button>
-                ))}
-              </div>
-
-              {!loading && !err && q.trim() && results.length === 0 ? (
-                <div style={{ marginTop: 12, opacity: 0.8, fontSize: 13 }}>
-                  No results. Try a different search.
+                    <div
+                      style={{
+                        fontSize: 12,
+                        opacity: 0.75,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {a.artistName}
+                    </div>
+                  </div>
                 </div>
-              ) : null}
+              ))}
             </div>
+
+            {!searching && q.trim() && albums.length === 0 && !searchError ? (
+              <div style={{ marginTop: 12, opacity: 0.7 }}>No results.</div>
+            ) : null}
           </div>
         </div>
       ) : null}

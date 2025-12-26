@@ -56,7 +56,7 @@ function titleContainsColorWord(title: string) {
     "navy",
     "maroon",
     "lavender",
-    "indigo",
+    "indigo"
   ];
 
   for (const c of colors) {
@@ -83,142 +83,123 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
   if (promptKey === "tracks_11_15") {
     const miss = requireKnown(d.totalTracks, "Track count");
     if (miss) return miss;
-
-    return d.totalTracks >= 11 && d.totalTracks <= 15
+    const n = d.totalTracks as number;
+    return n >= 11 && n <= 15
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 11 to 15 tracks, got ${d.totalTracks}.` };
+      : { ok: false, reason: `Needs 11 to 15 tracks, got ${n}.` };
   }
 
   if (promptKey === "tracks_16_20") {
     const miss = requireKnown(d.totalTracks, "Track count");
     if (miss) return miss;
-
-    return d.totalTracks >= 16 && d.totalTracks <= 20
+    const n = d.totalTracks as number;
+    return n >= 16 && n <= 20
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 16 to 20 tracks, got ${d.totalTracks}.` };
+      : { ok: false, reason: `Needs 16 to 20 tracks, got ${n}.` };
   }
 
   if (promptKey === "tracks_6_10") {
     const miss = requireKnown(d.totalTracks, "Track count");
     if (miss) return miss;
-
-    return d.totalTracks >= 6 && d.totalTracks <= 10
+    const n = d.totalTracks as number;
+    return n >= 6 && n <= 10
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 6 to 10 tracks, got ${d.totalTracks}.` };
+      : { ok: false, reason: `Needs 6 to 10 tracks, got ${n}.` };
   }
 
   if (promptKey === "tracks_5_or_less") {
     const miss = requireKnown(d.totalTracks, "Track count");
     if (miss) return miss;
-
-    return d.totalTracks <= 5
+    const n = d.totalTracks as number;
+    return n <= 5
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 5 or fewer tracks, got ${d.totalTracks}.` };
+      : { ok: false, reason: `Needs 5 or fewer tracks, got ${n}.` };
   }
 
   if (promptKey === "tracks_21_plus") {
     const miss = requireKnown(d.totalTracks, "Track count");
     if (miss) return miss;
-
-    return d.totalTracks >= 21
+    const n = d.totalTracks as number;
+    return n >= 21
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 21+ tracks, got ${d.totalTracks}.` };
+      : { ok: false, reason: `Needs 21+ tracks, got ${n}.` };
   }
 
   if (promptKey === "released_2010s") {
     const y = parseYear(d.releaseDate);
-
-    if (typeof y !== "number") {
-      return { ok: false, reason: "Release year not available from Spotify for this item." };
-    }
-
-    return y >= 2010 && y <= 2019
+    const miss = requireKnown(y, "Release year");
+    if (miss) return miss;
+    const year = y as number;
+    return year >= 2010 && year <= 2019
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 2010 to 2019, got ${y}.` };
+      : { ok: false, reason: `Needs 2010 to 2019, got ${year}.` };
   }
 
   if (promptKey === "released_2000s") {
     const y = parseYear(d.releaseDate);
-
-    if (typeof y !== "number") {
-      return { ok: false, reason: "Release year not available from Spotify for this item." };
-    }
-
-    return y >= 2000 && y <= 2009
+    const miss = requireKnown(y, "Release year");
+    if (miss) return miss;
+    const year = y as number;
+    return year >= 2000 && year <= 2009
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 2000 to 2009, got ${y}.` };
+      : { ok: false, reason: `Needs 2000 to 2009, got ${year}.` };
   }
 
   if (promptKey === "released_1990s") {
     const y = parseYear(d.releaseDate);
-
-    if (typeof y !== "number") {
-      return { ok: false, reason: "Release year not available from Spotify for this item." };
-    }
-
-    return y >= 1990 && y <= 1999
+    const miss = requireKnown(y, "Release year");
+    if (miss) return miss;
+    const year = y as number;
+    return year >= 1990 && year <= 1999
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 1990 to 1999, got ${y}.` };
+      : { ok: false, reason: `Needs 1990 to 1999, got ${year}.` };
   }
 
   if (promptKey === "released_before_1990") {
     const y = parseYear(d.releaseDate);
-
-    if (typeof y !== "number") {
-      return { ok: false, reason: "Release year not available from Spotify for this item." };
-    }
-
-    return y < 1990
+    const miss = requireKnown(y, "Release year");
+    if (miss) return miss;
+    const year = y as number;
+    return year < 1990
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs before 1990, got ${y}.` };
+      : { ok: false, reason: `Needs before 1990, got ${year}.` };
   }
 
   if (promptKey === "released_2020_plus") {
     const y = parseYear(d.releaseDate);
-
-    if (typeof y !== "number") {
-      return { ok: false, reason: "Release year not available from Spotify for this item." };
-    }
-
-    return y >= 2020
+    const miss = requireKnown(y, "Release year");
+    if (miss) return miss;
+    const year = y as number;
+    return year >= 2020
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 2020 or later, got ${y}.` };
+      : { ok: false, reason: `Needs 2020 or later, got ${year}.` };
   }
 
   if (promptKey === "artist_genres_0") {
-    const g = d.artistGenresCount;
-
-    if (typeof g !== "number") {
-      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
-    }
-
-    return g === 0
+    const miss = requireKnown(d.artistGenresCount, "Artist genres");
+    if (miss) return miss;
+    const n = d.artistGenresCount as number;
+    return n === 0
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 0 genres listed, got ${g}.` };
+      : { ok: false, reason: `Needs 0 genres listed, got ${n}.` };
   }
 
   if (promptKey === "artist_genres_1_2") {
-    const g = d.artistGenresCount;
-
-    if (typeof g !== "number") {
-      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
-    }
-
-    return g >= 1 && g <= 2
+    const miss = requireKnown(d.artistGenresCount, "Artist genres");
+    if (miss) return miss;
+    const n = d.artistGenresCount as number;
+    return n >= 1 && n <= 2
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 1 to 2 genres listed, got ${g}.` };
+      : { ok: false, reason: `Needs 1 to 2 genres listed, got ${n}.` };
   }
 
   if (promptKey === "artist_genres_3_plus") {
-    const g = d.artistGenresCount;
-
-    if (typeof g !== "number") {
-      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
-    }
-
-    return g >= 3
+    const miss = requireKnown(d.artistGenresCount, "Artist genres");
+    if (miss) return miss;
+    const n = d.artistGenresCount as number;
+    return n >= 3
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 3+ genres listed, got ${g}.` };
+      : { ok: false, reason: `Needs 3+ genres listed, got ${n}.` };
   }
 
   if (promptKey === "album_type_single_or_ep") {
@@ -244,8 +225,9 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
   if (promptKey === "no_explicit_tracks") {
     const miss = requireKnown(d.hasExplicitTrack, "Explicit track data");
     if (miss) return miss;
+    const b = d.hasExplicitTrack as boolean;
 
-    return d.hasExplicitTrack === false
+    return b === false
       ? { ok: true, reason: "OK" }
       : { ok: false, reason: "This album has at least one explicit track." };
   }
@@ -253,8 +235,9 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
   if (promptKey === "has_explicit_track") {
     const miss = requireKnown(d.hasExplicitTrack, "Explicit track data");
     if (miss) return miss;
+    const b = d.hasExplicitTrack as boolean;
 
-    return d.hasExplicitTrack === true
+    return b === true
       ? { ok: true, reason: "OK" }
       : { ok: false, reason: "This album has no explicit tracks." };
   }
@@ -263,7 +246,7 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
     const miss = requireKnown(d.popularity, "Popularity");
     if (miss) return miss;
 
-    const p = d.popularity ?? 0;
+    const p = d.popularity as number;
     return p >= 70
       ? { ok: true, reason: "OK" }
       : { ok: false, reason: `Needs popularity 70+, got ${p}.` };
@@ -311,10 +294,10 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
   if (promptKey === "artist_followers_1m_plus") {
     const miss = requireKnown(d.artistFollowers, "Artist followers");
     if (miss) return miss;
-
-    return (d.artistFollowers ?? 0) >= 1_000_000
+    const f = d.artistFollowers as number;
+    return f >= 1_000_000
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 1M+ followers, got ${d.artistFollowers ?? 0}.` };
+      : { ok: false, reason: `Needs 1M+ followers, got ${f}.` };
   }
 
   return { ok: false, reason: "Unknown prompt rule." };
