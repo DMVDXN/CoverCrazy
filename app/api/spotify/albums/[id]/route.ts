@@ -63,8 +63,7 @@ export async function GET(
     }
 
     const tracks = Array.isArray(album?.tracks?.items) ? album.tracks.items : [];
-    const hasExplicitTrack =
-      tracks.length > 0 ? tracks.some((t: any) => t?.explicit === true) : null;
+    const hasExplicitTrack = tracks.length > 0 ? tracks.some((t: any) => t?.explicit === true) : null;
 
     return NextResponse.json(
       {

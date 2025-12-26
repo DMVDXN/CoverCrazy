@@ -12,16 +12,6 @@ type FilledAlbum = {
   spotifyUrl: string | null;
 };
 
-type AlbumDetails = FilledAlbum & {
-  releaseDate: string | null;
-  totalTracks: number | null;
-  albumType: string | null;
-  popularity: number | null;
-  artistFollowers: number | null;
-  artistGenresCount: number | null;
-  hasExplicitTrack: boolean | null;
-};
-
 type BoardSquare = {
   position: number;
   promptKey: string;
@@ -36,6 +26,9 @@ type BingoBoard = {
 };
 
 type RuleResult = { ok: boolean; reason: string };
+
+// This guarantees your local "details" type always matches validatePrompt exactly.
+type SpotifyAlbumDetails = Parameters<typeof validatePrompt>[1];
 
 function idxToRowCol(i: number) {
   return { row: Math.floor(i / 5), col: i % 5 };
@@ -96,12 +89,12 @@ export default function BoardPage() {
 
       if (!res.ok) {
         setBoard(null);
-        setErrorMsg(typeof data?.error === "string" ? data.error : `Failed to load board: ${res.status}`);
+        setErrorMsg(typeof (data as any)?.error === "string" ? (data as any).error : `Failed to load board: ${res.status}`);
         setLoading(false);
         return;
       }
 
-      const b = (data?.board ?? data) as BingoBoard;
+      const b = ((data as any)?.board ?? data) as BingoBoard;
 
       if (!b || typeof b.id !== "string" || !Array.isArray((b as any).squares)) {
         setBoard(null);
@@ -135,7 +128,7 @@ export default function BoardPage() {
 
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      throw new Error(typeof j?.error === "string" ? j.error : `Clear failed: ${res.status}`);
+      throw new Error(typeof (j as any)?.error === "string" ? (j as any).error : `Clear failed: ${res.status}`);
     }
   }
 
@@ -149,7 +142,7 @@ export default function BoardPage() {
 
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      throw new Error(typeof j?.error === "string" ? j.error : `Fill failed: ${res.status}`);
+      throw new Error(typeof (j as any)?.error === "string" ? (j as any).error : `Fill failed: ${res.status}`);
     }
   }
 
@@ -182,12 +175,12 @@ export default function BoardPage() {
 
         if (!res.ok) {
           setAlbums([]);
-          setSearchError(typeof data?.error === "string" ? data.error : "Search failed.");
+          setSearchError(typeof (data as any)?.error === "string" ? (data as any).error : "Search failed.");
           setSearching(false);
           return;
         }
 
-        setAlbums(Array.isArray(data?.albums) ? data.albums : []);
+        setAlbums(Array.isArray((data as any)?.albums) ? (data as any).albums : []);
         setSearching(false);
       } catch (e: any) {
         setAlbums([]);
@@ -238,7 +231,6 @@ export default function BoardPage() {
     if (!sq) return;
 
     try {
-      // IMPORTANT: this must match your route: app/api/spotify/albums/[id]/route.ts
       const res = await fetch(`/api/spotify/albums/${encodeURIComponent(albumId)}`, {
         cache: "no-store",
       });
@@ -251,9 +243,21 @@ export default function BoardPage() {
         return;
       }
 
-      const details = data as AlbumDetails;
+      // Force required fields to exist so validatePrompt always receives the right shape.
+      const raw = data as any;
 
-      if (!details?.id || !details?.name) {
+      const details = {
+        ...raw,
+        releaseDate: raw?.releaseDate ?? null,
+        totalTracks: raw?.totalTracks ?? null,
+        albumType: raw?.albumType ?? null,
+        popularity: raw?.popularity ?? null,
+        artistFollowers: raw?.artistFollowers ?? null,
+        artistGenresCount: raw?.artistGenresCount ?? null,
+        hasExplicitTrack: raw?.hasExplicitTrack ?? null,
+      } as SpotifyAlbumDetails;
+
+      if (!(details as any)?.id || !(details as any)?.name) {
         setSearchError("Album details response was missing.");
         return;
       }
@@ -265,11 +269,11 @@ export default function BoardPage() {
       }
 
       const fill: FilledAlbum = {
-        id: details.id,
-        name: details.name,
-        artistName: details.artistName,
-        imageUrl: details.imageUrl ?? null,
-        spotifyUrl: details.spotifyUrl ?? null,
+        id: (details as any).id,
+        name: (details as any).name,
+        artistName: (details as any).artistName,
+        imageUrl: (details as any).imageUrl ?? null,
+        spotifyUrl: (details as any).spotifyUrl ?? null,
       };
 
       setBoard({
