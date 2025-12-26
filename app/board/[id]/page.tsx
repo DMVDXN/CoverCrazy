@@ -13,9 +13,13 @@ type FilledAlbum = {
 };
 
 type AlbumDetails = FilledAlbum & {
-  releaseDate?: string | null;
-  totalTracks?: number | null;
-  albumType?: string | null;
+  releaseDate: string | null;
+  totalTracks: number | null;
+  albumType: string | null;
+  popularity: number | null;
+  artistFollowers: number | null;
+  artistGenresCount: number | null;
+  hasExplicitTrack: boolean | null;
 };
 
 type BoardSquare = {
