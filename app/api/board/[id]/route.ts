@@ -22,11 +22,7 @@ type PromptDef = { key: string; text: string };
 function supabaseAdmin() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !key) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  }
-
+  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
@@ -43,7 +39,7 @@ function mulberry32(seed: number) {
   };
 }
 
-function pickPrompts(size: number, seed: number): PromptDef[] {
+function pickPrompts(totalSquares: number, seed: number): PromptDef[] {
   const bank = (PROMPTS as PromptDef[]).slice();
   const rand = mulberry32(seed || 1);
 
@@ -54,59 +50,53 @@ function pickPrompts(size: number, seed: number): PromptDef[] {
     bank[j] = tmp;
   }
 
-  return bank.slice(0, size);
+  return bank.slice(0, totalSquares);
 }
 
-async function seedSquaresIfMissing(sb: ReturnType<typeof supabaseAdmin>, board: any) {
-  const size = Number(board?.size) || 25;
-  const seed = Number(board?.seed) || 1;
+function boardTotals(board: any) {
+  const dim = Number(board?.size) || 5;   // in your schema size is the grid dimension
+  const total = dim * dim;               // real number of squares
+  const seed = Number(board?.seed) || 1; // seed is text in your schema
+  return { dim, total, seed };
+}
 
-  // Check again inside this function (prevents double-seed races)
-  const { data: existing } = await sb
+async function ensureSquaresComplete(sb: ReturnType<typeof supabaseAdmin>, board: any) {
+  const { total, seed } = boardTotals(board);
+
+  const { data: existing, error: exErr } = await sb
     .from("board_squares")
     .select("position")
-    .eq("board_id", board.id)
-    .limit(1);
+    .eq("board_id", board.id);
 
-  if (existing && existing.length > 0) return;
+  if (exErr) throw new Error(exErr.message);
 
-  let rows: any[] = [];
+  const existingSet = new Set<number>((existing ?? []).map((r: any) => Number(r.position)));
 
-  // If you previously stored squares in boards.data.squares, use that first
-  const dataSquares = board?.data?.squares;
-  if (Array.isArray(dataSquares) && dataSquares.length >= size) {
-    rows = dataSquares.slice(0, size).map((s: any, idx: number) => ({
+  if (existingSet.size >= total) return;
+
+  const chosen = pickPrompts(total, seed);
+  if (chosen.length !== total) throw new Error(`Prompt bank too small. Need ${total}, got ${chosen.length}.`);
+
+  const toInsert: any[] = [];
+  for (let pos = 0; pos < total; pos++) {
+    if (existingSet.has(pos)) continue;
+    const p = chosen[pos];
+    toInsert.push({
       board_id: board.id,
-      position: Number(s?.position ?? idx),
-      prompt_key: String(s?.promptKey ?? s?.prompt_key ?? ""),
-      prompt_text: String(s?.promptText ?? s?.prompt_text ?? ""),
-      fill: s?.fill ?? null,
-      filled_by: null,
-      filled_at: null,
-    }));
-  } else {
-    // Normal: generate from prompt bank
-    const chosen = pickPrompts(size, seed);
-    if (chosen.length !== size) {
-      throw new Error(`Prompt bank too small. Need ${size}, got ${chosen.length}.`);
-    }
-
-    rows = chosen.map((p, idx) => ({
-      board_id: board.id,
-      position: idx,
+      position: pos,
       prompt_key: p.key,
       prompt_text: p.text,
       fill: null,
       filled_by: null,
       filled_at: null,
-    }));
+    });
   }
 
-  // Best if you have a unique constraint on (board_id, position)
-  // If you do not, change upsert to insert.
+  if (toInsert.length === 0) return;
+
   const { error } = await sb
-    .from("board_squares")
-    .upsert(rows, { onConflict: "board_id,position" });
+    #.from("board_squares")
+    .upsert(toInsert, { onConflict: "board_id,position" });
 
   if (error) throw new Error(error.message);
 }
@@ -129,65 +119,38 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id?: string }>
     if (boardErr) return NextResponse.json({ error: boardErr.message }, { status: 400 });
     if (!board) return NextResponse.json({ error: "Board not found." }, { status: 404 });
 
-    // Try to load squares
-    let { data: squares, error: sqErr } = await sb
+    await ensureSquaresComplete(sb, board);
+
+    const { total } = boardTotals(board);
+
+    const { data: squares, error: sqErr } = await sb
       .from("board_squares")
       .select("position, prompt_key, prompt_text, fill")
       .eq("board_id", id)
       .order("position", { ascending: true });
 
-    // Auto seed if missing
-    if (!sqErr && (!squares || squares.length === 0)) {
-      await seedSquaresIfMissing(sb, board);
+    if (sqErr) return NextResponse.json({ error: sqErr.message }, { status: 400 });
 
-      const retry = await sb
-        .from("board_squares")
-        .select("position, prompt_key, prompt_text, fill")
-        .eq("board_id", id)
-        .order("position", { ascending: true });
-
-      squares = retry.data ?? [];
-      sqErr = retry.error ?? null;
-    }
-
-    if (!sqErr && squares && squares.length > 0) {
-      const mapped: BoardSquare[] = squares.map((s: any) => ({
+    const mapped: BoardSquare[] = (squares ?? [])
+      .filter((s: any) => Number(s.position) >= 0 && Number(s.position) < total)
+      .map((s: any) => ({
         position: Number(s.position),
         promptKey: String(s.prompt_key ?? ""),
         promptText: String(s.prompt_text ?? ""),
         fill: (s.fill ?? null) as FilledAlbum | null,
       }));
 
-      return NextResponse.json(
-        {
-          id: board.id,
-          mode: board.mode,
-          size: board.size,
-          seed: board.seed,
-          dailyDate: board.daily_date ?? null,
-          squares: mapped,
-        },
-        { status: 200 }
-      );
-    }
-
-    // Final fallback: if stored in boards.data
-    const dataSquares = (board as any)?.data?.squares;
-    if (Array.isArray(dataSquares)) {
-      return NextResponse.json(
-        {
-          id: board.id,
-          mode: board.mode,
-          size: board.size,
-          seed: board.seed,
-          dailyDate: board.daily_date ?? null,
-          squares: dataSquares,
-        },
-        { status: 200 }
-      );
-    }
-
-    return NextResponse.json({ error: "Board has no squares yet." }, { status: 500 });
+    return NextResponse.json(
+      {
+        id: board.id,
+        mode: board.mode,
+        size: Number(board.size) || 5, // dimension
+        seed: board.seed ?? null,
+        dailyDate: board.daily_date ?? null,
+        squares: mapped,
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to load board." }, { status: 500 });
   }
@@ -204,11 +167,24 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
     const action = String(body?.action ?? "");
     const position = Number(body?.position);
 
-    if (!Number.isInteger(position) || position < 0 || position > 24) {
+    const sb = supabaseAdmin();
+
+    const { data: board, error: boardErr } = await sb
+      .from("boards")
+      .select("id, size, seed")
+      .eq("id", id)
+      .single();
+
+    if (boardErr) return NextResponse.json({ error: boardErr.message }, { status: 400 });
+    if (!board) return NextResponse.json({ error: "Board not found." }, { status: 404 });
+
+    const { total } = boardTotals(board);
+
+    if (!Number.isInteger(position) || position < 0 || position > total - 1) {
       return NextResponse.json({ error: "Invalid position." }, { status: 400 });
     }
 
-    const sb = supabaseAdmin();
+    await ensureSquaresComplete(sb, board);
 
     if (action === "clear") {
       const { error } = await sb
