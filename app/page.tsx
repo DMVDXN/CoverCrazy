@@ -1,65 +1,73 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+
+export default function HomePage() {
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function onNewBoard() {
+    setLoading(true);
+    setMsg(null);
+
+    try {
+      const res = await fetch("/api/board/new", { cache: "no-store" });
+
+      if (!res.ok) {
+        setMsg("Could not create a new board.");
+        return;
+      }
+
+      const board = await res.json();
+      localStorage.setItem(`covercrazy:board:${board.id}`, JSON.stringify(board));
+      router.push(`/board/${board.id}`);
+    } catch {
+      setMsg("Could not create a new board.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <main
+      style={{
+        minHeight: "100vh",
+        background: "#0b0f19",
+        color: "white",
+        padding: 28
+      }}
+    >
+      <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <h1 style={{ fontSize: 48, fontWeight: 900, margin: 0 }}>Cover Crazy</h1>
+
+        <p style={{ marginTop: 10, opacity: 0.75, fontSize: 16 }}>
+          Create a 5x5 bingo board and fill squares with albums that match each prompt.
+        </p>
+
+        <button
+          onClick={onNewBoard}
+          disabled={loading}
+          style={{
+            marginTop: 16,
+            padding: "12px 16px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: loading ? "rgba(255,255,255,0.12)" : "white",
+            color: loading ? "rgba(255,255,255,0.65)" : "#0b0f19",
+            cursor: loading ? "not-allowed" : "pointer",
+            fontWeight: 900,
+            minWidth: 160
+          }}
+        >
+          {loading ? "Creating..." : "New 5x5 Board"}
+        </button>
+
+        {msg ? (
+          <div style={{ marginTop: 12, color: "#ff6b6b", fontWeight: 900 }}>{msg}</div>
+        ) : null}
+      </div>
+    </main>
   );
 }
