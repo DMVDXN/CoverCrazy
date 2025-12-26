@@ -186,30 +186,39 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
   }
 
   if (promptKey === "artist_genres_0") {
-    const miss = requireKnown(d.artistGenresCount, "Artist genres");
-    if (miss) return miss;
+    const g = d.artistGenresCount;
 
-    return d.artistGenresCount === 0
+    if (typeof g !== "number") {
+      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
+    }
+
+    return g === 0
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 0 genres listed, got ${d.artistGenresCount}.` };
+      : { ok: false, reason: `Needs 0 genres listed, got ${g}.` };
   }
 
   if (promptKey === "artist_genres_1_2") {
-    const miss = requireKnown(d.artistGenresCount, "Artist genres");
-    if (miss) return miss;
+    const g = d.artistGenresCount;
 
-    return d.artistGenresCount >= 1 && d.artistGenresCount <= 2
+    if (typeof g !== "number") {
+      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
+    }
+
+    return g >= 1 && g <= 2
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 1 to 2 genres listed, got ${d.artistGenresCount}.` };
+      : { ok: false, reason: `Needs 1 to 2 genres listed, got ${g}.` };
   }
 
   if (promptKey === "artist_genres_3_plus") {
-    const miss = requireKnown(d.artistGenresCount, "Artist genres");
-    if (miss) return miss;
+    const g = d.artistGenresCount;
 
-    return d.artistGenresCount >= 3
+    if (typeof g !== "number") {
+      return { ok: false, reason: "Artist genres not available from Spotify for this item." };
+    }
+
+    return g >= 3
       ? { ok: true, reason: "OK" }
-      : { ok: false, reason: `Needs 3+ genres listed, got ${d.artistGenresCount}.` };
+      : { ok: false, reason: `Needs 3+ genres listed, got ${g}.` };
   }
 
   if (promptKey === "album_type_single_or_ep") {
