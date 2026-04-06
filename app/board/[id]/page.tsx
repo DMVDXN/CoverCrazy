@@ -262,6 +262,14 @@ export default function BoardPage() {
         return;
       }
 
+      const alreadyUsed = board.squares.some(
+        (s) => s.fill?.id === (details as any).id && s.position !== activePos
+      );
+      if (alreadyUsed) {
+        setSearchError("This album is already placed on another square.");
+        return;
+      }
+
       const rule: RuleResult = validatePrompt(sq.promptKey, details);
       if (!rule.ok) {
         setSearchError(rule.reason);

@@ -23,9 +23,9 @@ export const PROMPTS: PromptDef[] = [
   { key: "artist_one_word", text: "Artist name is one word" },
   { key: "title_one_word", text: "Title is one word" },
   { key: "title_contains_number", text: "Title contains a number" },
-  { key: "title_contains_live", text: 'Title contains "Live"' },
   { key: "title_contains_deluxe", text: 'Title contains "Deluxe"' },
-  { key: "title_contains_color_word", text: "Title contains a color word" },
+  { key: "self_titled", text: "Self-titled album" },
+  { key: "compilation", text: "Compilation album" },
 
   { key: "album_type_album", text: "Album type: album" },
   { key: "album_type_single_or_ep", text: "Album type: single or EP" },

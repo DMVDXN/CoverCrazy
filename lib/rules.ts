@@ -291,6 +291,25 @@ export function validatePrompt(promptKey: string, d: SpotifyAlbumDetails): RuleR
       : { ok: false, reason: "Artist name is not one word." };
   }
 
+  if (promptKey === "self_titled") {
+    // Album title contains or starts with the artist name (case-insensitive).
+    const nt = normalize(title);
+    const na = normalize(artistName);
+    const ok = na.length >= 2 && (nt === na || nt.startsWith(na));
+    return ok
+      ? { ok: true, reason: "OK" }
+      : { ok: false, reason: "Album title does not match the artist name." };
+  }
+
+  if (promptKey === "compilation") {
+    const miss = requireKnown(d.albumType, "Album type");
+    if (miss) return miss;
+    const t = (d.albumType || "").toLowerCase();
+    return t === "compilation"
+      ? { ok: true, reason: "OK" }
+      : { ok: false, reason: `Needs a compilation album, got "${d.albumType}".` };
+  }
+
   if (promptKey === "artist_followers_1m_plus") {
     const miss = requireKnown(d.artistFollowers, "Artist followers");
     if (miss) return miss;

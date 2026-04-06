@@ -74,18 +74,27 @@ async function ensureSquaresComplete(sb: ReturnType<typeof supabaseAdmin>, board
 
   if (existingSet.size >= total) return;
 
-  const chosen = pickPrompts(total, seed);
+  // Prefer the original squares stored in boards.data over re-generating with a
+  // numeric seed (board.seed is a UUID, so Number(UUID) === NaN, making every
+  // board fall back to seed=1 and therefore identical prompts).
+  const originalSquares: { position: number; promptKey: string; promptText: string }[] =
+    Array.isArray(board.data?.squares) ? board.data.squares : [];
+
+  const chosen = originalSquares.length >= total
+    ? originalSquares.slice(0, total)
+    : pickPrompts(total, seed);
+
   if (chosen.length !== total) throw new Error(`Prompt bank too small. Need ${total}, got ${chosen.length}.`);
 
   const toInsert: any[] = [];
   for (let pos = 0; pos < total; pos++) {
     if (existingSet.has(pos)) continue;
-    const p = chosen[pos];
+    const p = chosen[pos] as any;
     toInsert.push({
       board_id: board.id,
       position: pos,
-      prompt_key: p.key,
-      prompt_text: p.text,
+      prompt_key: p.promptKey ?? p.key,
+      prompt_text: p.promptText ?? p.text,
       fill: null,
       filled_by: null,
       filled_at: null,
@@ -95,7 +104,7 @@ async function ensureSquaresComplete(sb: ReturnType<typeof supabaseAdmin>, board
   if (toInsert.length === 0) return;
 
   const { error } = await sb
-    #.from("board_squares")
+    .from("board_squares")
     .upsert(toInsert, { onConflict: "board_id,position" });
 
   if (error) throw new Error(error.message);
