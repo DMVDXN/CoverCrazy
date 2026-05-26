@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { PROMPTS } from "@/lib/prompts";
+import { FieldValue } from "firebase-admin/firestore";
+import { firestore } from "@/lib/firebaseAdmin";
+import { getPromptsForPack, normalizePackKey } from "@/lib/packs";
+
+type FilledBy = {
+  id: string;
+  name: string;
+  color: string;
+};
 
 type FilledAlbum = {
   id: string;
@@ -8,6 +15,9 @@ type FilledAlbum = {
   artistName: string;
   imageUrl: string | null;
   spotifyUrl: string | null;
+  filledBy?: FilledBy | null;
+  filledAt?: string | null;
+  spotlightBonus?: boolean;
 };
 
 type BoardSquare = {
@@ -18,13 +28,6 @@ type BoardSquare = {
 };
 
 type PromptDef = { key: string; text: string };
-
-function supabaseAdmin() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  return createClient(url, key, { auth: { persistSession: false } });
-}
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
@@ -39,8 +42,9 @@ function mulberry32(seed: number) {
   };
 }
 
-function pickPrompts(totalSquares: number, seed: number): PromptDef[] {
-  const bank = (PROMPTS as PromptDef[]).slice();
+function pickPrompts(totalSquares: number, seed: number, packKey: string | null): PromptDef[] {
+  const pack = normalizePackKey(packKey);
+  const bank = getPromptsForPack(pack).map((p) => ({ key: p.key, text: p.text }));
   const rand = mulberry32(seed || 1);
 
   for (let i = bank.length - 1; i > 0; i--) {
@@ -54,60 +58,65 @@ function pickPrompts(totalSquares: number, seed: number): PromptDef[] {
 }
 
 function boardTotals(board: any) {
-  const dim = Number(board?.size) || 5;   // in your schema size is the grid dimension
-  const total = dim * dim;               // real number of squares
-  const seed = Number(board?.seed) || 1; // seed is text in your schema
+  const dim = Number(board?.size) || 5;
+  const total = dim * dim;
+  const seed = Number(board?.seed) || 1;
   return { dim, total, seed };
 }
 
-async function ensureSquaresComplete(sb: ReturnType<typeof supabaseAdmin>, board: any) {
+function normalizeSquare(s: any, position: number): BoardSquare {
+  return {
+    position,
+    promptKey: String(s?.promptKey ?? s?.prompt_key ?? ""),
+    promptText: String(s?.promptText ?? s?.prompt_text ?? ""),
+    fill: (s?.fill ?? null) as FilledAlbum | null,
+  };
+}
+
+function ensureSquaresComplete(board: any): BoardSquare[] {
   const { total, seed } = boardTotals(board);
+  const existing: any[] = Array.isArray(board?.squares) ? board.squares : [];
 
-  const { data: existing, error: exErr } = await sb
-    .from("board_squares")
-    .select("position")
-    .eq("board_id", board.id);
-
-  if (exErr) throw new Error(exErr.message);
-
-  const existingSet = new Set<number>((existing ?? []).map((r: any) => Number(r.position)));
-
-  if (existingSet.size >= total) return;
-
-  // Prefer the original squares stored in boards.data over re-generating with a
-  // numeric seed (board.seed is a UUID, so Number(UUID) === NaN, making every
-  // board fall back to seed=1 and therefore identical prompts).
-  const originalSquares: { position: number; promptKey: string; promptText: string }[] =
-    Array.isArray(board.data?.squares) ? board.data.squares : [];
-
-  const chosen = originalSquares.length >= total
-    ? originalSquares.slice(0, total)
-    : pickPrompts(total, seed);
-
-  if (chosen.length !== total) throw new Error(`Prompt bank too small. Need ${total}, got ${chosen.length}.`);
-
-  const toInsert: any[] = [];
-  for (let pos = 0; pos < total; pos++) {
-    if (existingSet.has(pos)) continue;
-    const p = chosen[pos] as any;
-    toInsert.push({
-      board_id: board.id,
-      position: pos,
-      prompt_key: p.promptKey ?? p.key,
-      prompt_text: p.promptText ?? p.text,
-      fill: null,
-      filled_by: null,
-      filled_at: null,
-    });
+  const byPosition = new Map<number, BoardSquare>();
+  for (const s of existing) {
+    const pos = Number(s?.position);
+    if (Number.isInteger(pos) && pos >= 0 && pos < total) {
+      byPosition.set(pos, normalizeSquare(s, pos));
+    }
   }
 
-  if (toInsert.length === 0) return;
+  if (byPosition.size >= total) {
+    const out: BoardSquare[] = [];
+    for (let p = 0; p < total; p++) out.push(byPosition.get(p)!);
+    return out;
+  }
 
-  const { error } = await sb
-    .from("board_squares")
-    .upsert(toInsert, { onConflict: "board_id,position" });
+  const fallback = pickPrompts(total, seed, board?.packKey ?? null);
+  const out: BoardSquare[] = [];
+  for (let pos = 0; pos < total; pos++) {
+    const present = byPosition.get(pos);
+    if (present) {
+      out.push(present);
+      continue;
+    }
+    const p = fallback[pos] as any;
+    out.push({
+      position: pos,
+      promptKey: p?.promptKey ?? p?.key ?? "",
+      promptText: p?.promptText ?? p?.text ?? "",
+      fill: null,
+    });
+  }
+  return out;
+}
 
-  if (error) throw new Error(error.message);
+function normalizePlayer(input: unknown): FilledBy | null {
+  const data = input as { id?: unknown; name?: unknown; color?: unknown };
+  const id = typeof data?.id === "string" ? data.id.trim() : "";
+  const name = typeof data?.name === "string" ? data.name.trim().slice(0, 32) : "";
+  const color = typeof data?.color === "string" ? data.color.trim() : "#7cf3a8";
+  if (!id || !name) return null;
+  return { id, name, color: color || "#7cf3a8" };
 }
 
 export async function GET(_req: Request, ctx: { params: Promise<{ id?: string }> }) {
@@ -117,46 +126,35 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id?: string }>
     if (!id) return NextResponse.json({ error: "Missing board id." }, { status: 400 });
     if (!isUuid(id)) return NextResponse.json({ error: "Invalid board id." }, { status: 400 });
 
-    const sb = supabaseAdmin();
+    const db = firestore();
+    const snap = await db.collection("boards").doc(id).get();
 
-    const { data: board, error: boardErr } = await sb
-      .from("boards")
-      .select("id, mode, size, seed, daily_date, data, created_at, updated_at")
-      .eq("id", id)
-      .single();
+    if (!snap.exists) return NextResponse.json({ error: "Board not found." }, { status: 404 });
 
-    if (boardErr) return NextResponse.json({ error: boardErr.message }, { status: 400 });
-    if (!board) return NextResponse.json({ error: "Board not found." }, { status: 404 });
+    const board = snap.data() as any;
+    const squares = ensureSquaresComplete(board);
 
-    await ensureSquaresComplete(sb, board);
-
-    const { total } = boardTotals(board);
-
-    const { data: squares, error: sqErr } = await sb
-      .from("board_squares")
-      .select("position, prompt_key, prompt_text, fill")
-      .eq("board_id", id)
-      .order("position", { ascending: true });
-
-    if (sqErr) return NextResponse.json({ error: sqErr.message }, { status: 400 });
-
-    const mapped: BoardSquare[] = (squares ?? [])
-      .filter((s: any) => Number(s.position) >= 0 && Number(s.position) < total)
-      .map((s: any) => ({
-        position: Number(s.position),
-        promptKey: String(s.prompt_key ?? ""),
-        promptText: String(s.prompt_text ?? ""),
-        fill: (s.fill ?? null) as FilledAlbum | null,
-      }));
+    // Backfill the doc if we had to repair missing squares.
+    if (!Array.isArray(board.squares) || board.squares.length !== squares.length) {
+      await snap.ref.update({ squares, updatedAt: FieldValue.serverTimestamp() });
+    }
 
     return NextResponse.json(
       {
-        id: board.id,
+        id: board.id ?? id,
         mode: board.mode,
-        size: Number(board.size) || 5, // dimension
+        size: Number(board.size) || 5,
         seed: board.seed ?? null,
-        dailyDate: board.daily_date ?? null,
-        squares: mapped,
+        dailyDate: board.dailyDate ?? null,
+        packKey: board.packKey ?? "classic",
+        ownerId: board.ownerId ?? null,
+        roomCode: board.roomCode ?? null,
+        partyStatus: board.partyStatus ?? null,
+        partyStartedAt: board.partyStartedAt ?? null,
+        partyPlayers: Array.isArray(board.partyPlayers) ? board.partyPlayers : [],
+        partySpotlight: board.partySpotlight ?? null,
+        partyChallenges: Array.isArray(board.partyChallenges) ? board.partyChallenges : [],
+        squares,
       },
       { status: 200 }
     );
@@ -176,57 +174,150 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
     const action = String(body?.action ?? "");
     const position = Number(body?.position);
 
-    const sb = supabaseAdmin();
+    const db = firestore();
+    const ref = db.collection("boards").doc(id);
 
-    const { data: board, error: boardErr } = await sb
-      .from("boards")
-      .select("id, size, seed")
-      .eq("id", id)
-      .single();
+    const result = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return { status: 404, body: { error: "Board not found." } };
 
-    if (boardErr) return NextResponse.json({ error: boardErr.message }, { status: 400 });
-    if (!board) return NextResponse.json({ error: "Board not found." }, { status: 404 });
+      const board = snap.data() as any;
+      const { total } = boardTotals(board);
 
-    const { total } = boardTotals(board);
+      const squares = ensureSquaresComplete(board);
 
-    if (!Number.isInteger(position) || position < 0 || position > total - 1) {
-      return NextResponse.json({ error: "Invalid position." }, { status: 400 });
-    }
-
-    await ensureSquaresComplete(sb, board);
-
-    if (action === "clear") {
-      const { error } = await sb
-        .from("board_squares")
-        .update({ fill: null, filled_by: null, filled_at: null })
-        .eq("board_id", id)
-        .eq("position", position);
-
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-      return NextResponse.json({ ok: true }, { status: 200 });
-    }
-
-    if (action === "fill") {
-      const fill = body?.fill as FilledAlbum | undefined;
-      if (!fill || !fill.id || !fill.name) {
-        return NextResponse.json({ error: "Missing fill payload." }, { status: 400 });
+      if (action === "spotlight") {
+        const openSquares = squares.filter((s) => s.position !== 12 && !s.fill);
+        if (openSquares.length === 0) return { status: 400, body: { error: "No open squares to spotlight." } };
+        const picked = openSquares[Math.floor(Math.random() * openSquares.length)];
+        const player = normalizePlayer(body?.player);
+        const spotlight = {
+          position: picked.position,
+          promptText: picked.promptText,
+          createdAt: new Date().toISOString(),
+          createdBy: player,
+        };
+        tx.update(ref, { partySpotlight: spotlight, updatedAt: FieldValue.serverTimestamp() });
+        return { status: 200, body: { ok: true, spotlight } };
       }
 
-      const { error } = await sb
-        .from("board_squares")
-        .update({
-          fill,
-          filled_by: null,
-          filled_at: new Date().toISOString(),
-        })
-        .eq("board_id", id)
-        .eq("position", position);
+      if (!Number.isInteger(position) || position < 0 || position > total - 1) {
+        return { status: 400, body: { error: "Invalid position." } };
+      }
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 });
-      return NextResponse.json({ ok: true }, { status: 200 });
-    }
+      if (action === "clear") {
+        squares[position] = { ...squares[position], fill: null };
+        const challenges = Array.isArray(board.partyChallenges)
+          ? board.partyChallenges.filter((c: any) => c?.position !== position || c?.status === "resolved")
+          : [];
+        tx.update(ref, { squares, partyChallenges: challenges, updatedAt: FieldValue.serverTimestamp() });
+        return { status: 200, body: { ok: true } };
+      }
 
-    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
+      if (action === "fill") {
+        const fill = body?.fill as FilledAlbum | undefined;
+        if (!fill || !fill.id || !fill.name) {
+          return { status: 400, body: { error: "Missing fill payload." } };
+        }
+        const filledBy = body?.filledBy as FilledBy | undefined;
+        const enriched: FilledAlbum = {
+          id: fill.id,
+          name: fill.name,
+          artistName: fill.artistName,
+          imageUrl: fill.imageUrl ?? null,
+          spotifyUrl: fill.spotifyUrl ?? null,
+          filledBy:
+            filledBy && filledBy.id && filledBy.name
+              ? { id: String(filledBy.id), name: String(filledBy.name), color: String(filledBy.color || "#7cf3a8") }
+              : null,
+          filledAt: new Date().toISOString(),
+          spotlightBonus: board.partySpotlight?.position === position,
+        };
+        squares[position] = { ...squares[position], fill: enriched };
+        const updates: Record<string, unknown> = {
+          squares,
+          updatedAt: FieldValue.serverTimestamp(),
+        };
+        if (board.partySpotlight?.position === position) {
+          updates.partySpotlight = null;
+        }
+        if (enriched.filledBy?.id) {
+          updates.players = FieldValue.arrayUnion(enriched.filledBy.id);
+        }
+        tx.update(ref, updates);
+        return { status: 200, body: { ok: true } };
+      }
+
+      if (action === "challenge") {
+        const player = normalizePlayer(body?.player);
+        if (!player) return { status: 400, body: { error: "Missing challenger." } };
+        const fill = squares[position]?.fill;
+        if (!fill?.filledBy?.id) return { status: 400, body: { error: "That square has not been filled." } };
+        if (fill.filledBy.id === player.id) {
+          return { status: 400, body: { error: "You can't challenge your own pick." } };
+        }
+
+        const existing = Array.isArray(board.partyChallenges) ? board.partyChallenges : [];
+        if (existing.some((c: any) => c?.position === position && c?.status === "open")) {
+          return { status: 409, body: { error: "That square is already being challenged." } };
+        }
+
+        const challenge = {
+          id: crypto.randomUUID(),
+          position,
+          promptText: squares[position].promptText,
+          albumName: fill.name,
+          artistName: fill.artistName,
+          challenger: player,
+          target: fill.filledBy,
+          votes: { valid: [], invalid: [player.id] },
+          status: "open",
+          createdAt: new Date().toISOString(),
+        };
+        tx.update(ref, {
+          partyChallenges: [challenge, ...existing].slice(0, 12),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        return { status: 200, body: { ok: true, challenge } };
+      }
+
+      if (action === "voteChallenge") {
+        const player = normalizePlayer(body?.player);
+        const challengeId = typeof body?.challengeId === "string" ? body.challengeId : "";
+        const vote = body?.vote === "valid" ? "valid" : body?.vote === "invalid" ? "invalid" : "";
+        if (!player || !challengeId || !vote) return { status: 400, body: { error: "Missing challenge vote." } };
+
+        const challenges = Array.isArray(board.partyChallenges) ? [...board.partyChallenges] : [];
+        const idx = challenges.findIndex((c: any) => c?.id === challengeId && c?.status === "open");
+        if (idx < 0) return { status: 404, body: { error: "Challenge not found." } };
+
+        const challenge = challenges[idx] as any;
+        const valid = new Set<string>(Array.isArray(challenge.votes?.valid) ? challenge.votes.valid : []);
+        const invalid = new Set<string>(Array.isArray(challenge.votes?.invalid) ? challenge.votes.invalid : []);
+        valid.delete(player.id);
+        invalid.delete(player.id);
+        if (vote === "valid") valid.add(player.id);
+        else invalid.add(player.id);
+
+        challenge.votes = { valid: [...valid], invalid: [...invalid] };
+        if (invalid.size >= 2) {
+          challenge.status = "invalid";
+          challenge.resolvedAt = new Date().toISOString();
+          squares[challenge.position] = { ...squares[challenge.position], fill: null };
+        } else if (valid.size >= 2) {
+          challenge.status = "valid";
+          challenge.resolvedAt = new Date().toISOString();
+        }
+
+        challenges[idx] = challenge;
+        tx.update(ref, { squares, partyChallenges: challenges, updatedAt: FieldValue.serverTimestamp() });
+        return { status: 200, body: { ok: true, challenge } };
+      }
+
+      return { status: 400, body: { error: "Unknown action." } };
+    });
+
+    return NextResponse.json(result.body, { status: result.status });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to update square." }, { status: 500 });
   }

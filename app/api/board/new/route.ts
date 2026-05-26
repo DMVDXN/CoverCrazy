@@ -1,7 +1,8 @@
 // app/api/board/new/route.ts
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { PROMPTS } from "@/lib/prompts";
+import { FieldValue } from "firebase-admin/firestore";
+import { firestore } from "@/lib/firebaseAdmin";
+import { getPromptsForPack, normalizePackKey, type PackKey } from "@/lib/packs";
 
 type FilledAlbum = {
   id: string;
@@ -18,7 +19,7 @@ type BoardSquare = {
   fill: FilledAlbum | null;
 };
 
-type BoardMode = "solo" | "shared" | "daily";
+type BoardMode = "solo" | "shared" | "party" | "daily";
 
 type BingoBoard = {
   id: string;
@@ -29,15 +30,6 @@ type BingoBoard = {
   squares: BoardSquare[];
 };
 
-function supabaseAdmin() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-
-  return createClient(url, key, { auth: { persistSession: false } });
-}
-
 function toISODateOnly(d: Date) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -47,10 +39,17 @@ function toISODateOnly(d: Date) {
 
 function normalizeMode(input: unknown): BoardMode {
   const v = String(input ?? "").trim().toLowerCase();
-  if (v === "live" || v === "party") return "shared";
+  if (v === "live" || v === "party") return "party";
   if (v === "shared") return "shared";
   if (v === "daily") return "daily";
   return "solo";
+}
+
+function roomCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < 6; i++) out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return out;
 }
 
 function hashSeedToInt(seed: string) {
@@ -85,51 +84,14 @@ function shuffleSeeded<T>(arr: T[], seedStr: string) {
   return a;
 }
 
-function buildSquares(seed: string, size: number): BoardSquare[] {
-  const list = Array.isArray(PROMPTS) ? PROMPTS : [];
-
-  const fallback = [
-    { key: "tracks_11_15", text: "11 to 15 tracks" },
-    { key: "tracks_16_20", text: "16 to 20 tracks" },
-    { key: "tracks_6_10", text: "6 to 10 tracks" },
-    { key: "tracks_5_or_less", text: "5 tracks or fewer" },
-    { key: "tracks_21_plus", text: "21 tracks or more" },
-    { key: "released_2010s", text: "Released in the 2010s" },
-    { key: "released_2000s", text: "Released in the 2000s" },
-    { key: "released_1990s", text: "Released in the 1990s" },
-    { key: "released_before_1990", text: "Released before 1990" },
-    { key: "released_2020_plus", text: "Released in 2020 or later" },
-    { key: "artist_genres_0", text: "Artist has 0 genres listed" },
-    { key: "artist_genres_1_2", text: "Artist has 1 to 2 genres listed" },
-    { key: "artist_genres_3_plus", text: "Artist has 3+ genres listed" },
-    { key: "album_type_single_or_ep", text: "Album type: single or EP" },
-    { key: "album_type_album", text: "Album type: album" },
-    { key: "album_popularity_70_plus", text: "Album popularity 70+" },
-    { key: "no_explicit_tracks", text: "No explicit tracks" },
-    { key: "has_explicit_track", text: "Has at least one explicit track" },
-    { key: "title_contains_live", text: 'Title contains "Live"' },
-    { key: "title_contains_deluxe", text: 'Title contains "Deluxe"' },
-    { key: "title_contains_number", text: "Title contains a number" },
-    { key: "title_contains_color_word", text: "Title contains a color word" },
-    { key: "title_one_word", text: "Title is one word" },
-    { key: "artist_one_word", text: "Artist name is one word" },
-    { key: "artist_followers_1m_plus", text: "Artist has 1M+ followers" },
-  ];
-
-  const normalized =
-    list.length > 0
-      ? list
-          .map((p: any) => ({
-            key: String(p.key ?? p.promptKey ?? ""),
-            text: String(p.text ?? p.promptText ?? ""),
-          }))
-          .filter((p) => p.key && p.text)
-      : fallback;
+function buildSquares(seed: string, size: number, packKey: PackKey): BoardSquare[] {
+  const pool = getPromptsForPack(packKey).map((p) => ({ key: p.key, text: p.text }));
+  const list = pool.length > 0 ? pool : getPromptsForPack("classic").map((p) => ({ key: p.key, text: p.text }));
 
   const dim = Number(size) || 5;
   const total = dim * dim;
 
-  const picked = shuffleSeeded(normalized, seed);
+  const picked = shuffleSeeded(list, seed);
 
   const chosen: { key: string; text: string }[] = [];
   let idx = 0;
@@ -146,77 +108,97 @@ function buildSquares(seed: string, size: number): BoardSquare[] {
   }));
 }
 
-async function createBoard(mode: BoardMode) {
-  const sb = supabaseAdmin();
+async function createBoard(
+  mode: BoardMode,
+  packKey: PackKey,
+  ownerId: string | null
+): Promise<BingoBoard & { packKey: PackKey }> {
+  const db = firestore();
 
   const id = crypto.randomUUID();
   const size = 5; // dimension
   const seed = crypto.randomUUID();
   const dailyDate = mode === "daily" ? toISODateOnly(new Date()) : null;
+  let code: string | null = null;
 
-  const board: BingoBoard = {
+  if (mode === "party") {
+    for (let i = 0; i < 8; i++) {
+      const candidate = roomCode();
+      const existing = await db.collection("boards").where("roomCode", "==", candidate).limit(1).get();
+      if (existing.empty) {
+        code = candidate;
+        break;
+      }
+    }
+    if (!code) throw new Error("Could not create a unique party code.");
+  }
+
+  const board = {
     id,
     mode,
     size,
     seed,
     dailyDate,
-    squares: buildSquares(seed, size),
+    packKey,
+    roomCode: code,
+    squares: buildSquares(seed, size, packKey),
   };
 
-  const insertPayload: Record<string, any> = {
+  await db.collection("boards").doc(id).set({
     id,
     mode,
     size,
     seed,
-    data: board,
-  };
-  if (dailyDate) insertPayload.daily_date = dailyDate;
-
-  const { error: boardErr } = await sb.from("boards").insert(insertPayload);
-  if (boardErr) throw new Error(boardErr.message);
-
-  const squaresRows = board.squares.map((s) => ({
-    board_id: id,
-    position: s.position,
-    prompt_key: s.promptKey,
-    prompt_text: s.promptText,
-    fill: null,
-    filled_by: null,
-    filled_at: null,
-  }));
-
-  const { error: sqErr } = await sb
-    .from("board_squares")
-    .upsert(squaresRows, { onConflict: "board_id,position" });
-
-  if (sqErr) {
-    await sb.from("boards").delete().eq("id", id);
-    throw new Error(sqErr.message);
-  }
+    dailyDate,
+    packKey,
+    roomCode: code,
+    partyStatus: mode === "party" ? "lobby" : null,
+    partyStartedAt: null,
+    ownerId: ownerId ?? null,
+    players: ownerId ? [ownerId] : [],
+    partyPlayers: [],
+    squares: board.squares,
+    createdAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
 
   return board;
 }
 
-// GET /api/board/new?mode=solo|shared|daily
+function normalizeOwnerId(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > 128) return null;
+  return trimmed;
+}
+
+// GET /api/board/new?mode=solo|shared|daily&pack=classic|modern|vintage&ownerId=...
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const mode = normalizeMode(url.searchParams.get("mode"));
-    const board = await createBoard(mode);
+    const packKey = normalizePackKey(url.searchParams.get("pack"));
+    const ownerId = normalizeOwnerId(url.searchParams.get("ownerId"));
+    const board = await createBoard(mode, packKey, ownerId);
     return NextResponse.json({ id: board.id, board }, { status: 201 });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Failed to create board" }, { status: 500 });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Failed to create board";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 
-// POST /api/board/new with body: { "mode": "solo" | "shared" | "daily" }
+// POST /api/board/new with body: { mode, pack?, ownerId? }
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const mode = normalizeMode(body?.mode);
-    const board = await createBoard(mode);
+    const packKey = normalizePackKey(body?.pack);
+    const ownerId = normalizeOwnerId(body?.ownerId);
+    const board = await createBoard(mode, packKey, ownerId);
     return NextResponse.json({ id: board.id, board }, { status: 201 });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || "Failed to create board" }, { status: 500 });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Failed to create board";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
