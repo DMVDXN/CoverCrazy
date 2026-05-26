@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { signInWithCustomToken, updateProfile } from "firebase/auth";
 import { clientAuth } from "@/lib/firebaseClient";
 
-export default function SpotifyCompletePage() {
+function SpotifyCompleteContent() {
   const router = useRouter();
   const params = useSearchParams();
   const [error, setError] = useState("");
@@ -76,5 +76,20 @@ export default function SpotifyCompletePage() {
         <p style={{ marginTop: 14, opacity: 0.7 }}>One sec…</p>
       )}
     </main>
+  );
+}
+
+export default function SpotifyCompletePage() {
+  return (
+    <Suspense
+      fallback={
+        <main style={{ maxWidth: 520, margin: "60px auto", padding: 24, color: "white", textAlign: "center" }}>
+          <h1 style={{ fontSize: 26, fontWeight: 900 }}>Signing you in with Spotify...</h1>
+          <p style={{ marginTop: 14, opacity: 0.7 }}>One sec...</p>
+        </main>
+      }
+    >
+      <SpotifyCompleteContent />
+    </Suspense>
   );
 }
