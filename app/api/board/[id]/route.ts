@@ -154,6 +154,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id?: string }>
         partyPlayers: Array.isArray(board.partyPlayers) ? board.partyPlayers : [],
         partySpotlight: board.partySpotlight ?? null,
         partyChallenges: Array.isArray(board.partyChallenges) ? board.partyChallenges : [],
+        partyMarks: board.partyMarks ?? {},
         squares,
       },
       { status: 200 }
@@ -233,6 +234,29 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
           filledAt: new Date().toISOString(),
           spotlightBonus: board.partySpotlight?.position === position,
         };
+        if (board.mode === "party") {
+          if (!enriched.filledBy?.id) {
+            return { status: 400, body: { error: "Party fills require a player." } };
+          }
+          if (board.partySpotlight?.position !== position) {
+            return { status: 400, body: { error: "That prompt has not been called yet." } };
+          }
+
+          const marks = { ...(board.partyMarks ?? {}) };
+          const mine = { ...(marks[enriched.filledBy.id] ?? {}) };
+          mine[String(position)] = enriched;
+          marks[enriched.filledBy.id] = mine;
+
+          const updates: Record<string, unknown> = {
+            partyMarks: marks,
+            partySpotlight: null,
+            players: FieldValue.arrayUnion(enriched.filledBy.id),
+            updatedAt: FieldValue.serverTimestamp(),
+          };
+          tx.update(ref, updates);
+          return { status: 200, body: { ok: true } };
+        }
+
         squares[position] = { ...squares[position], fill: enriched };
         const updates: Record<string, unknown> = {
           squares,

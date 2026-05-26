@@ -35,6 +35,10 @@ type BoardSquare = {
   fill: FilledAlbum | null;
 };
 
+type DisplaySquare = BoardSquare & {
+  displayPosition: number;
+};
+
 type PartyPlayer = {
   id: string;
   name: string;
@@ -73,6 +77,7 @@ type BingoBoard = {
   partyPlayers: PartyPlayer[];
   partySpotlight: PartySpotlight | null;
   partyChallenges: PartyChallenge[];
+  partyMarks: Record<string, Record<string, FilledAlbum>>;
   squares: BoardSquare[];
 };
 
@@ -105,14 +110,71 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
-function isFilled(sq: BoardSquare | undefined): boolean {
+function hashString(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function personalOrder(boardId: string, playerId: string): number[] {
+  const order = Array.from({ length: BOARD_TOTAL }, (_, i) => i);
+  const rand = mulberry32(hashString(`${boardId}:${playerId}`) || 1);
+
+  for (let i = order.length - 1; i > 0; i--) {
+    if (i === FREE_POSITION) continue;
+    const available = order.map((_, idx) => idx).filter((idx) => idx !== FREE_POSITION && idx <= i);
+    const j = available[Math.floor(rand() * available.length)] ?? i;
+    const tmp = order[i];
+    order[i] = order[j];
+    order[j] = tmp;
+  }
+
+  return order;
+}
+
+function toDisplaySquares(
+  squares: BoardSquare[],
+  boardId: string,
+  playerId: string | null,
+  isParty: boolean,
+  partyMarks: Record<string, Record<string, FilledAlbum>>
+): DisplaySquare[] {
+  const canonical = [...squares].sort((a, b) => a.position - b.position);
+  if (!isParty || !playerId) {
+    return canonical.map((sq) => ({ ...sq, displayPosition: sq.position }));
+  }
+
+  const order = personalOrder(boardId, playerId);
+  const marks = partyMarks[playerId] ?? {};
+  return order
+    .map<DisplaySquare | null>((canonicalPosition, displayPosition) => {
+      const sq = canonical.find((item) => item.position === canonicalPosition);
+      return sq ? { ...sq, fill: marks[String(canonicalPosition)] ?? null, displayPosition } : null;
+    })
+    .filter((sq): sq is DisplaySquare => !!sq);
+}
+
+function isFilled(sq: DisplaySquare | BoardSquare | undefined): boolean {
   if (!sq) return false;
-  if (sq.position === FREE_POSITION) return true;
+  const pos = "displayPosition" in sq ? sq.displayPosition : sq.position;
+  if (pos === FREE_POSITION) return true;
   return !!sq.fill;
 }
 
-function findWinningLines(squares: BoardSquare[]): number[][] {
-  const byPos = new Map(squares.map((s) => [s.position, s]));
+function findWinningLines(squares: DisplaySquare[]): number[][] {
+  const byPos = new Map(squares.map((s) => [s.displayPosition, s]));
   return BINGO_LINES.filter((line) => line.every((p) => isFilled(byPos.get(p))));
 }
 
@@ -130,7 +192,7 @@ function formatElapsed(ms: number): string {
 }
 
 function buildShareText(opts: {
-  squares: BoardSquare[];
+  squares: DisplaySquare[];
   winningPositions: Set<number>;
   picks: number;
   elapsedMs: number;
@@ -138,7 +200,7 @@ function buildShareText(opts: {
   blackout: boolean;
 }): string {
   const { squares, winningPositions, picks, elapsedMs, url, blackout } = opts;
-  const byPos = new Map(squares.map((s) => [s.position, s]));
+  const byPos = new Map(squares.map((s) => [s.displayPosition, s]));
 
   const rows: string[] = [];
   for (let r = 0; r < BOARD_DIM; r++) {
@@ -201,7 +263,7 @@ function initials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-function scoreParty(squares: BoardSquare[], partyPlayers: PartyPlayer[]) {
+function scoreParty(squares: DisplaySquare[], partyPlayers: PartyPlayer[]) {
   const byId = new Map<string, { player: PartyPlayer; fills: number; lineContrib: number; score: number }>();
   for (const player of partyPlayers) {
     byId.set(player.id, { player, fills: 0, lineContrib: 0, score: 0 });
@@ -209,7 +271,7 @@ function scoreParty(squares: BoardSquare[], partyPlayers: PartyPlayer[]) {
 
   for (const sq of squares) {
     const filledBy = sq.fill?.filledBy;
-    if (!filledBy?.id || sq.position === FREE_POSITION) continue;
+    if (!filledBy?.id || sq.displayPosition === FREE_POSITION) continue;
     const current =
       byId.get(filledBy.id) ??
       {
@@ -302,7 +364,14 @@ export default function BoardPage() {
     return [...board.squares].sort((a, b) => a.position - b.position);
   }, [board]);
 
-  const winningLines = useMemo(() => findWinningLines(squares), [squares]);
+  const isShared = board?.mode === "shared" || board?.mode === "party";
+  const isParty = board?.mode === "party";
+  const displaySquares = useMemo(
+    () => toDisplaySquares(squares, boardId, player?.id ?? null, !!isParty, board?.partyMarks ?? {}),
+    [squares, boardId, player?.id, isParty, board?.partyMarks]
+  );
+
+  const winningLines = useMemo(() => findWinningLines(displaySquares), [displaySquares]);
   const winningPositions = useMemo(() => {
     const set = new Set<number>();
     for (const line of winningLines) for (const p of line) set.add(p);
@@ -310,10 +379,10 @@ export default function BoardPage() {
   }, [winningLines]);
 
   const hasBingo = winningLines.length > 0;
-  const blackout = useMemo(() => isBlackout(squares), [squares]);
+  const blackout = useMemo(() => isBlackout(displaySquares), [displaySquares]);
   const pickCount = useMemo(
-    () => squares.filter((s) => s.position !== FREE_POSITION && s.fill).length,
-    [squares]
+    () => displaySquares.filter((s) => s.displayPosition !== FREE_POSITION && s.fill).length,
+    [displaySquares]
   );
 
   const elapsedMs = useMemo(() => {
@@ -322,21 +391,31 @@ export default function BoardPage() {
     return Math.max(0, end - startedAt);
   }, [startedAt, endedAt, nowTick]);
 
-  const isShared = board?.mode === "shared" || board?.mode === "party";
-  const isParty = board?.mode === "party";
   const packDef = useMemo(() => PACKS.find((p) => p.key === board?.packKey) ?? PACKS[0], [board?.packKey]);
-  const partyScores = useMemo(() => scoreParty(squares, board?.partyPlayers ?? []), [squares, board?.partyPlayers]);
+  const partyScores = useMemo(
+    () => scoreParty(displaySquares, board?.partyPlayers ?? []),
+    [displaySquares, board?.partyPlayers]
+  );
   const openChallenges = useMemo(
     () => (board?.partyChallenges ?? []).filter((c) => c.status === "open").slice(0, 4),
     [board?.partyChallenges]
   );
   const recentPartyFills = useMemo(
-    () =>
-      squares
+    () => {
+      if (!board) return [];
+      const marks = Object.values(board.partyMarks).flatMap((playerMarks) =>
+        Object.entries(playerMarks).map(([position, fill]) => ({
+          position: Number(position),
+          promptText: board.squares.find((s) => s.position === Number(position))?.promptText ?? "",
+          fill,
+        }))
+      );
+      return marks
         .filter((s) => s.fill?.filledAt && s.fill?.filledBy)
         .sort((a, b) => String(b.fill?.filledAt).localeCompare(String(a.fill?.filledAt)))
-        .slice(0, 6),
-    [squares]
+        .slice(0, 6);
+    },
+    [board]
   );
 
   function normalizeBoardData(b: any): BingoBoard | null {
@@ -351,6 +430,7 @@ export default function BoardPage() {
       partyPlayers: Array.isArray(b.partyPlayers) ? (b.partyPlayers as PartyPlayer[]) : [],
       partySpotlight: b.partySpotlight && typeof b.partySpotlight.position === "number" ? b.partySpotlight : null,
       partyChallenges: Array.isArray(b.partyChallenges) ? (b.partyChallenges as PartyChallenge[]) : [],
+      partyMarks: b.partyMarks && typeof b.partyMarks === "object" ? b.partyMarks : {},
       squares: b.squares as BoardSquare[],
     };
   }
@@ -532,8 +612,8 @@ export default function BoardPage() {
     setShowWinBanner(true);
 
     const finalElapsed = startedAt ? Math.max(0, endTs - startedAt) : 0;
-    const finalBlackout = isBlackout(squares);
-    const finalPicks = squares.filter((s) => s.position !== FREE_POSITION && s.fill).length;
+    const finalBlackout = isBlackout(displaySquares);
+    const finalPicks = displaySquares.filter((s) => s.displayPosition !== FREE_POSITION && s.fill).length;
 
     if (authUser) {
       recordBingo(authUser.uid, {
@@ -599,6 +679,10 @@ export default function BoardPage() {
 
   function openPicker(position: number) {
     if (position === FREE_POSITION) return;
+    if (isParty && board?.partySpotlight?.position !== position) {
+      setPartyActionStatus("Wait for this prompt to be called before marking it.");
+      return;
+    }
     setActivePos(position);
     setModalOpen(true);
     setQ("");
@@ -665,7 +749,11 @@ export default function BoardPage() {
       const alreadyUsed = board.squares.some(
         (s) => s.fill?.id === (details as any).id && s.position !== activePos
       );
-      if (alreadyUsed) {
+      const partyAlreadyUsed =
+        isParty &&
+        player &&
+        Object.values(board.partyMarks[player.id] ?? {}).some((fill) => fill.id === (details as any).id);
+      if (alreadyUsed || partyAlreadyUsed) {
         setSearchError("This album is already placed on another square.");
         return;
       }
@@ -686,10 +774,24 @@ export default function BoardPage() {
         filledAt: new Date().toISOString(),
       };
 
-      setBoard({
-        ...board,
-        squares: board.squares.map((s) => (s.position === activePos ? { ...s, fill } : s)),
-      });
+      if (isParty && player) {
+        setBoard({
+          ...board,
+          partyMarks: {
+            ...board.partyMarks,
+            [player.id]: {
+              ...(board.partyMarks[player.id] ?? {}),
+              [String(activePos)]: fill,
+            },
+          },
+          partySpotlight: null,
+        });
+      } else {
+        setBoard({
+          ...board,
+          squares: board.squares.map((s) => (s.position === activePos ? { ...s, fill } : s)),
+        });
+      }
 
       closePicker();
       await patchFill(activePos, fill);
@@ -703,7 +805,7 @@ export default function BoardPage() {
     if (!board) return;
     const url = typeof window !== "undefined" ? window.location.href : "";
     const text = buildShareText({
-      squares,
+      squares: displaySquares,
       winningPositions,
       picks: pickCount,
       elapsedMs,
@@ -1346,11 +1448,11 @@ export default function BoardPage() {
           gap: 14,
         }}
       >
-        {squares.map((sq) => {
-          const { row, col } = idxToRowCol(sq.position);
-          const isFree = sq.position === FREE_POSITION;
+        {displaySquares.map((sq) => {
+          const { row, col } = idxToRowCol(sq.displayPosition);
+          const isFree = sq.displayPosition === FREE_POSITION;
           const filled = isFree || !!sq.fill;
-          const inWin = winningPositions.has(sq.position);
+          const inWin = winningPositions.has(sq.displayPosition);
           const filledBy = sq.fill?.filledBy ?? null;
           const isMine = !!(filledBy && player && filledBy.id === player.id);
           const isSpotlight = isParty && board.partySpotlight?.position === sq.position;
@@ -1358,7 +1460,7 @@ export default function BoardPage() {
 
           return (
             <div
-              key={sq.position}
+              key={`${sq.position}-${sq.displayPosition}`}
               onClick={() => {
                 if (!filled) openPicker(sq.position);
               }}
@@ -1384,7 +1486,7 @@ export default function BoardPage() {
                 color: "white",
                 padding: 14,
                 minHeight: 130,
-                cursor: filled ? "default" : "pointer",
+                cursor: filled ? "default" : isParty && !isSpotlight ? "not-allowed" : "pointer",
                 overflow: "hidden",
                 animation: inWin ? "cc-glow 1.6s ease-in-out infinite" : undefined,
               }}
@@ -1488,7 +1590,13 @@ export default function BoardPage() {
                     <div style={{ marginTop: 6, fontSize: 18, fontWeight: 800 }}>{sq.promptText}</div>
 
                     {!sq.fill ? (
-                      <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>Click to add an album</div>
+                      <div style={{ marginTop: 8, fontSize: 13, opacity: 0.7 }}>
+                        {isParty
+                          ? isSpotlight
+                            ? "Called now. Submit an album to mark it."
+                            : "Waiting to be called"
+                          : "Click to add an album"}
+                      </div>
                     ) : (
                       <div style={{ marginTop: 10 }}>
                         <div style={{ fontSize: 14, fontWeight: 800 }}>{sq.fill.name}</div>
