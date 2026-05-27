@@ -86,10 +86,35 @@ type RuleResult = { ok: boolean; reason: string };
 
 type SpotifyAlbumDetails = Parameters<typeof validatePrompt>[1];
 
+type SoloFeedback = "correct" | "close" | "miss";
+
+type SoloGuess = {
+  albumId: string;
+  albumName: string;
+  artistName: string;
+  imageUrl: string | null;
+  values: string[];
+  feedback: SoloFeedback[];
+};
+
+type SoloTarget = {
+  era: number;
+  type: string;
+  tracks: number;
+  popularity: number;
+  explicit: boolean;
+};
+
 const FREE_POSITION = 12;
 const BOARD_DIM = 5;
 const BOARD_TOTAL = BOARD_DIM * BOARD_DIM;
-const SOLO_MAX_MISSES = 6;
+const SOLO_MAX_GUESSES = 6;
+const SOLO_GUESS_POSITION = -99;
+const SOLO_COLUMNS = ["Era", "Type", "Tracks", "Popularity", "Explicit"];
+const SOLO_ERAS = [1970, 1980, 1990, 2000, 2010, 2020];
+const SOLO_TYPES = ["album", "single", "compilation"];
+const SOLO_TRACK_BUCKETS = [5, 10, 15, 20, 30];
+const SOLO_POP_BUCKETS = [30, 50, 70, 85];
 
 const BINGO_LINES: number[][] = (() => {
   const lines: number[][] = [];
@@ -191,6 +216,73 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function bucketIndex(value: number | null, buckets: number[]): number {
+  if (value === null || Number.isNaN(value)) return 0;
+  const idx = buckets.findIndex((max) => value <= max);
+  return idx === -1 ? buckets.length - 1 : idx;
+}
+
+function bucketLabel(idx: number, buckets: number[], suffix = ""): string {
+  if (idx <= 0) return `${buckets[0]}${suffix} or fewer`;
+  if (idx >= buckets.length - 1) return `${buckets[idx - 1] + 1}${suffix}+`;
+  return `${buckets[idx - 1] + 1}-${buckets[idx]}${suffix}`;
+}
+
+function albumEra(details: SpotifyAlbumDetails): number {
+  const raw = String((details as any)?.releaseDate ?? "");
+  const year = Number(raw.slice(0, 4));
+  if (!Number.isFinite(year)) return 2000;
+  return Math.floor(year / 10) * 10;
+}
+
+function makeSoloTarget(boardId: string): SoloTarget {
+  const rand = mulberry32(hashString(`solo:${boardId}`) || 1);
+  return {
+    era: SOLO_ERAS[Math.floor(rand() * SOLO_ERAS.length)],
+    type: SOLO_TYPES[Math.floor(rand() * SOLO_TYPES.length)],
+    tracks: Math.floor(rand() * SOLO_TRACK_BUCKETS.length),
+    popularity: Math.floor(rand() * SOLO_POP_BUCKETS.length),
+    explicit: rand() > 0.5,
+  };
+}
+
+function evaluateSoloGuess(details: SpotifyAlbumDetails, target: SoloTarget): SoloGuess {
+  const era = albumEra(details);
+  const type = String((details as any)?.albumType ?? "album");
+  const tracks = bucketIndex(Number((details as any)?.totalTracks ?? 0), SOLO_TRACK_BUCKETS);
+  const popularity = bucketIndex(Number((details as any)?.popularity ?? 0), SOLO_POP_BUCKETS);
+  const explicit = !!(details as any)?.hasExplicitTrack;
+
+  const feedback: SoloFeedback[] = [
+    era === target.era ? "correct" : Math.abs(SOLO_ERAS.indexOf(era) - SOLO_ERAS.indexOf(target.era)) === 1 ? "close" : "miss",
+    type === target.type ? "correct" : "miss",
+    tracks === target.tracks ? "correct" : Math.abs(tracks - target.tracks) === 1 ? "close" : "miss",
+    popularity === target.popularity ? "correct" : Math.abs(popularity - target.popularity) === 1 ? "close" : "miss",
+    explicit === target.explicit ? "correct" : "miss",
+  ];
+
+  return {
+    albumId: String((details as any).id),
+    albumName: String((details as any).name),
+    artistName: String((details as any).artistName ?? ""),
+    imageUrl: ((details as any).imageUrl ?? null) as string | null,
+    values: [
+      `${era}s`,
+      type,
+      bucketLabel(tracks, SOLO_TRACK_BUCKETS),
+      bucketLabel(popularity, SOLO_POP_BUCKETS),
+      explicit ? "Explicit" : "Clean",
+    ],
+    feedback,
+  };
+}
+
+function soloFeedbackColor(feedback: SoloFeedback): string {
+  if (feedback === "correct") return "#7cf3a8";
+  if (feedback === "close") return "#ffd166";
+  return "#6f7787";
 }
 
 function buildShareText(opts: {
@@ -353,8 +445,7 @@ export default function BoardPage() {
   const [showWinBanner, setShowWinBanner] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
-  const [soloMisses, setSoloMisses] = useState(0);
-  const [soloFailed, setSoloFailed] = useState(false);
+  const [soloGuesses, setSoloGuesses] = useState<SoloGuess[]>([]);
   const [dailyStreak, setDailyStreak] = useState<number | null>(null);
   const celebratedRef = useRef(false);
 
@@ -375,6 +466,10 @@ export default function BoardPage() {
   const isParty = board?.mode === "party";
   const isSolo = board?.mode === "solo";
   const isHost = !!(isParty && player && board?.ownerId && board.ownerId === player.id);
+  const soloTarget = useMemo(() => makeSoloTarget(boardId), [boardId]);
+  const soloSolved = isSolo && soloGuesses.some((guess) => guess.feedback.every((f) => f === "correct"));
+  const soloFailed = isSolo && !soloSolved && soloGuesses.length >= SOLO_MAX_GUESSES;
+  const soloLocked = !!(isSolo && (soloSolved || soloFailed));
   const displaySquares = useMemo(
     () => toDisplaySquares(squares, boardId, player?.id ?? null, !!isParty, board?.partyMarks ?? {}),
     [squares, boardId, player?.id, isParty, board?.partyMarks]
@@ -388,8 +483,6 @@ export default function BoardPage() {
   }, [winningLines]);
 
   const hasBingo = winningLines.length > 0;
-  const soloMissesLeft = Math.max(0, SOLO_MAX_MISSES - soloMisses);
-  const soloLocked = !!(isSolo && (hasBingo || soloFailed));
   const blackout = useMemo(() => isBlackout(displaySquares), [displaySquares]);
   const pickCount = useMemo(
     () => displaySquares.filter((s) => s.displayPosition !== FREE_POSITION && s.fill).length,
@@ -541,12 +634,10 @@ export default function BoardPage() {
     if (!board || board.mode !== "solo") return;
     try {
       const raw = localStorage.getItem(`cc:solo:${board.id}`);
-      const data = raw ? (JSON.parse(raw) as { misses?: number; failed?: boolean }) : null;
-      setSoloMisses(typeof data?.misses === "number" ? data.misses : 0);
-      setSoloFailed(!!data?.failed);
+      const data = raw ? (JSON.parse(raw) as { guesses?: SoloGuess[] }) : null;
+      setSoloGuesses(Array.isArray(data?.guesses) ? data.guesses.slice(0, SOLO_MAX_GUESSES) : []);
     } catch {
-      setSoloMisses(0);
-      setSoloFailed(false);
+      setSoloGuesses([]);
     }
   }, [board?.id, board?.mode]);
 
@@ -727,26 +818,38 @@ export default function BoardPage() {
     setSearchError("");
   }
 
-  function recordSoloMiss(reason: string) {
-    if (!board || board.mode !== "solo") {
-      setSearchError(reason);
+  function openSoloGuess() {
+    if (soloLocked) {
+      setErrorMsg(soloSolved ? "Solo puzzle complete." : "Solo puzzle failed. Start a new board to try again.");
+      return;
+    }
+    setActivePos(SOLO_GUESS_POSITION);
+    setModalOpen(true);
+    setQ("");
+    setAlbums([]);
+    setSearchError("");
+  }
+
+  function submitSoloGuess(details: SpotifyAlbumDetails) {
+    if (!board) return;
+    const duplicate = soloGuesses.some((guess) => guess.albumId === String((details as any).id));
+    if (duplicate) {
+      setSearchError("You already guessed that album.");
       return;
     }
 
-    const nextMisses = Math.min(SOLO_MAX_MISSES, soloMisses + 1);
-    const failed = nextMisses >= SOLO_MAX_MISSES && !hasBingo;
-    setSoloMisses(nextMisses);
-    setSoloFailed(failed);
-    setSearchError(`${reason} (${SOLO_MAX_MISSES - nextMisses} misses left)`);
-
+    const guess = evaluateSoloGuess(details, soloTarget);
+    const next = [...soloGuesses, guess].slice(0, SOLO_MAX_GUESSES);
+    setSoloGuesses(next);
     try {
-      localStorage.setItem(`cc:solo:${board.id}`, JSON.stringify({ misses: nextMisses, failed }));
+      localStorage.setItem(`cc:solo:${board.id}`, JSON.stringify({ guesses: next }));
     } catch {
       // ignore local persistence failures
     }
+    closePicker();
 
-    if (failed) {
-      closePicker();
+    const solved = guess.feedback.every((f) => f === "correct");
+    if (solved || next.length >= SOLO_MAX_GUESSES) {
       setShowWinBanner(true);
     }
   }
@@ -769,8 +872,9 @@ export default function BoardPage() {
 
   async function pickAlbum(albumId: string) {
     if (!board || activePos === null) return;
-    const sq = board.squares.find((s) => s.position === activePos);
-    if (!sq) return;
+    const isSoloGuess = board.mode === "solo" && activePos === SOLO_GUESS_POSITION;
+    const sq = isSoloGuess ? null : board.squares.find((s) => s.position === activePos);
+    if (!sq && !isSoloGuess) return;
 
     try {
       const res = await fetch(`/api/spotify/albums/${encodeURIComponent(albumId)}`, { cache: "no-store" });
@@ -799,6 +903,11 @@ export default function BoardPage() {
         return;
       }
 
+      if (isSoloGuess) {
+        submitSoloGuess(details);
+        return;
+      }
+
       const alreadyUsed = board.squares.some(
         (s) => s.fill?.id === (details as any).id && s.position !== activePos
       );
@@ -807,13 +916,13 @@ export default function BoardPage() {
         player &&
         Object.values(board.partyMarks[player.id] ?? {}).some((fill) => fill.id === (details as any).id);
       if (alreadyUsed || partyAlreadyUsed) {
-        recordSoloMiss("This album is already placed on another square.");
+        setSearchError("This album is already placed on another square.");
         return;
       }
 
-      const rule: RuleResult = validatePrompt(sq.promptKey, details);
+      const rule: RuleResult = validatePrompt(sq!.promptKey, details);
       if (!rule.ok) {
-        recordSoloMiss(rule.reason);
+        setSearchError(rule.reason);
         return;
       }
 
@@ -856,6 +965,27 @@ export default function BoardPage() {
   async function copyShare() {
     if (!board) return;
     const url = typeof window !== "undefined" ? window.location.href : "";
+    if (isSolo) {
+      const rows = soloGuesses.map((guess) =>
+        guess.feedback.map((f) => (f === "correct" ? "🟩" : f === "close" ? "🟨" : "⬛")).join("")
+      );
+      const text = [
+        `Cover Crazy ${board.roomCode ?? board.id.slice(0, 8)} ${soloSolved ? soloGuesses.length : "X"}/${SOLO_MAX_GUESSES}`,
+        "",
+        ...rows,
+        "",
+        url,
+      ].join("\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        setShareCopied(true);
+        setTimeout(() => setShareCopied(false), 1800);
+      } catch {
+        setShareCopied(false);
+      }
+      return;
+    }
+
     const text = buildShareText({
       squares: displaySquares,
       winningPositions,
@@ -1136,7 +1266,7 @@ export default function BoardPage() {
           </span>
           {isSolo ? (
             <span style={{ opacity: 0.85 }}>
-              Misses: <strong>{soloMisses}/{SOLO_MAX_MISSES}</strong>
+              Guesses: <strong>{soloGuesses.length}/{SOLO_MAX_GUESSES}</strong>
             </span>
           ) : null}
           <span
@@ -1144,14 +1274,14 @@ export default function BoardPage() {
               padding: "4px 10px",
               borderRadius: 999,
               border: "1px solid rgba(255,255,255,0.18)",
-              background: soloFailed ? "rgba(255,107,107,0.16)" : hasBingo ? "rgba(80,230,150,0.18)" : "rgba(255,255,255,0.06)",
-              color: soloFailed ? "#ff8b8b" : hasBingo ? "#7cf3a8" : "white",
+              background: soloFailed ? "rgba(255,107,107,0.16)" : soloSolved || hasBingo ? "rgba(80,230,150,0.18)" : "rgba(255,255,255,0.06)",
+              color: soloFailed ? "#ff8b8b" : soloSolved || hasBingo ? "#7cf3a8" : "white",
               fontWeight: 800,
             }}
           >
-            {soloFailed ? "Missed" : blackout ? "Blackout!" : hasBingo ? `${winningLines.length}× Bingo` : "In progress"}
+            {soloFailed ? "Missed" : soloSolved ? "Solved" : blackout ? "Blackout!" : hasBingo ? `${winningLines.length}× Bingo` : "In progress"}
           </span>
-          {hasBingo || soloFailed ? (
+          {hasBingo || soloSolved || soloFailed ? (
             <button
               onClick={copyShare}
               style={{
@@ -1176,23 +1306,73 @@ export default function BoardPage() {
         <section
           style={{
             marginTop: 16,
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            flexWrap: "wrap",
-            padding: 12,
+            padding: 16,
             borderRadius: 14,
-            border: soloFailed ? "1px solid rgba(255,107,107,0.38)" : "1px solid rgba(255,255,255,0.12)",
-            background: soloFailed ? "rgba(255,107,107,0.08)" : "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            background: "rgba(255,255,255,0.04)",
           }}
         >
-          <span style={{ fontSize: 13, fontWeight: 900 }}>Solo puzzle</span>
-          <span style={{ fontSize: 13, opacity: 0.78 }}>
-            Fill a bingo line before {SOLO_MAX_MISSES} invalid album picks.
-          </span>
-          <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 900, color: soloMissesLeft <= 2 ? "#ffd166" : "#7cf3a8" }}>
-            {soloMissesLeft} misses left
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 14, fontWeight: 900 }}>Cover Wordle</span>
+            <span style={{ fontSize: 13, opacity: 0.72 }}>Guess an album that matches all five hidden traits.</span>
+            <button
+              onClick={openSoloGuess}
+              disabled={soloLocked}
+              style={{
+                marginLeft: "auto",
+                padding: "8px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(124,243,168,0.55)",
+                background: "rgba(124,243,168,0.16)",
+                color: "white",
+                cursor: soloLocked ? "not-allowed" : "pointer",
+                fontWeight: 850,
+                opacity: soloLocked ? 0.6 : 1,
+              }}
+            >
+              Guess album
+            </button>
+          </div>
+
+          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: 8 }}>
+            {SOLO_COLUMNS.map((label) => (
+              <div key={label} style={{ textAlign: "center", fontSize: 11, opacity: 0.68, fontWeight: 850 }}>
+                {label}
+              </div>
+            ))}
+            {Array.from({ length: SOLO_MAX_GUESSES }).map((_, row) => {
+              const guess = soloGuesses[row];
+              return SOLO_COLUMNS.map((label, col) => (
+                <div
+                  key={`${row}-${label}`}
+                  title={guess ? `${guess.albumName} - ${guess.values[col]}` : ""}
+                  style={{
+                    minHeight: 54,
+                    borderRadius: 8,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: guess ? soloFeedbackColor(guess.feedback[col]) : "rgba(255,255,255,0.035)",
+                    color: guess && guess.feedback[col] !== "miss" ? "#0a0e16" : "white",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    textAlign: "center",
+                    padding: 6,
+                    fontSize: 12,
+                    fontWeight: 900,
+                    overflow: "hidden",
+                  }}
+                >
+                  {guess ? guess.values[col] : ""}
+                </div>
+              ));
+            })}
+          </div>
+
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap", fontSize: 12, opacity: 0.78 }}>
+            <span><strong style={{ color: "#7cf3a8" }}>Green</strong> exact</span>
+            <span><strong style={{ color: "#ffd166" }}>Yellow</strong> close</span>
+            <span><strong>Gray</strong> miss</span>
+          </div>
         </section>
       ) : null}
 
@@ -1532,6 +1712,7 @@ export default function BoardPage() {
         </section>
       ) : null}
 
+      {!isSolo ? (
       <div
         style={{
           marginTop: 18,
@@ -1751,6 +1932,7 @@ export default function BoardPage() {
           );
         })}
       </div>
+      ) : null}
 
       {showWinBanner ? (
         <div
@@ -1812,14 +1994,16 @@ export default function BoardPage() {
             }}
           >
             <div style={{ fontSize: 14, opacity: 0.75, letterSpacing: 2 }}>
-              {soloFailed ? "SOLO RESULT" : blackout ? "FULL BOARD" : "YOU GOT IT"}
+              {isSolo ? "COVER WORDLE" : soloFailed ? "SOLO RESULT" : blackout ? "FULL BOARD" : "YOU GOT IT"}
             </div>
             <div style={{ fontSize: 48, fontWeight: 900, marginTop: 6, color: soloFailed ? "#ff8b8b" : "#7cf3a8" }}>
-              {soloFailed ? "MISSED" : blackout ? "BLACKOUT!" : "BINGO!"}
+              {isSolo ? (soloSolved ? "SOLVED" : "MISSED") : soloFailed ? "MISSED" : blackout ? "BLACKOUT!" : "BINGO!"}
             </div>
             <div style={{ marginTop: 10, fontSize: 15, opacity: 0.85 }}>
-              {soloFailed
-                ? `${pickCount} picks · ${soloMisses}/${SOLO_MAX_MISSES} misses`
+              {isSolo
+                ? `${soloSolved ? soloGuesses.length : "X"}/${SOLO_MAX_GUESSES} guesses`
+                : soloFailed
+                ? `${pickCount} picks · missed`
                 : `${winningLines.length}× line · ${pickCount} picks · ${formatElapsed(elapsedMs)}`}
             </div>
 
