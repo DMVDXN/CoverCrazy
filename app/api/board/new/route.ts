@@ -120,18 +120,15 @@ async function createBoard(
   const seed = crypto.randomUUID();
   const dailyDate = mode === "daily" ? toISODateOnly(new Date()) : null;
   let code: string | null = null;
-
-  if (mode === "party") {
-    for (let i = 0; i < 8; i++) {
-      const candidate = roomCode();
-      const existing = await db.collection("boards").where("roomCode", "==", candidate).limit(1).get();
-      if (existing.empty) {
-        code = candidate;
-        break;
-      }
+  for (let i = 0; i < 8; i++) {
+    const candidate = roomCode();
+    const existing = await db.collection("boards").where("roomCode", "==", candidate).limit(1).get();
+    if (existing.empty) {
+      code = candidate;
+      break;
     }
-    if (!code) throw new Error("Could not create a unique party code.");
   }
+  if (!code) throw new Error("Could not create a unique board code.");
 
   const board = {
     id,

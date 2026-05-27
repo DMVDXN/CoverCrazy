@@ -24,13 +24,13 @@ export async function GET(_req: Request, ctx: { params: Promise<{ code?: string 
   try {
     const { code: rawCode } = await ctx.params;
     const code = normalizeCode(rawCode);
-    if (code.length < 4) return NextResponse.json({ error: "Invalid party code." }, { status: 400 });
+    if (code.length < 4) return NextResponse.json({ error: "Invalid board code." }, { status: 400 });
 
     const doc = await findBoardByCode(code);
-    if (!doc) return NextResponse.json({ error: "Party room not found." }, { status: 404 });
+    if (!doc) return NextResponse.json({ error: "Board not found." }, { status: 404 });
     return NextResponse.json({ boardId: doc.id });
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : "Failed to find party room.";
+    const msg = e instanceof Error ? e.message : "Failed to find board.";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
@@ -41,11 +41,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ code?: string 
     const code = normalizeCode(rawCode);
     const body = await req.json().catch(() => ({}));
     const player = normalizePlayer(body?.player);
-    if (code.length < 4) return NextResponse.json({ error: "Invalid party code." }, { status: 400 });
+    if (code.length < 4) return NextResponse.json({ error: "Invalid board code." }, { status: 400 });
     if (!player) return NextResponse.json({ error: "Missing player." }, { status: 400 });
 
     const doc = await findBoardByCode(code);
-    if (!doc) return NextResponse.json({ error: "Party room not found." }, { status: 404 });
+    if (!doc) return NextResponse.json({ error: "Board not found." }, { status: 404 });
 
     const db = firestore();
     await db.runTransaction(async (tx) => {

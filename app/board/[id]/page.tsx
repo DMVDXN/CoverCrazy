@@ -72,6 +72,7 @@ type BingoBoard = {
   mode: "solo" | "party" | "shared" | "daily";
   packKey: PackKey;
   dailyDate: string | null;
+  ownerId: string | null;
   roomCode: string | null;
   partyStatus: string | null;
   partyPlayers: PartyPlayer[];
@@ -88,6 +89,7 @@ type SpotifyAlbumDetails = Parameters<typeof validatePrompt>[1];
 const FREE_POSITION = 12;
 const BOARD_DIM = 5;
 const BOARD_TOTAL = BOARD_DIM * BOARD_DIM;
+const SOLO_MAX_MISSES = 6;
 
 const BINGO_LINES: number[][] = (() => {
   const lines: number[][] = [];
@@ -198,8 +200,9 @@ function buildShareText(opts: {
   elapsedMs: number;
   url: string;
   blackout: boolean;
+  failed?: boolean;
 }): string {
-  const { squares, winningPositions, picks, elapsedMs, url, blackout } = opts;
+  const { squares, winningPositions, picks, elapsedMs, url, blackout, failed } = opts;
   const byPos = new Map(squares.map((s) => [s.displayPosition, s]));
 
   const rows: string[] = [];
@@ -220,7 +223,7 @@ function buildShareText(opts: {
     rows.push(cells.join(""));
   }
 
-  const header = blackout ? "🎵 Cover Crazy — BLACKOUT!" : "🎵 Cover Crazy — BINGO!";
+  const header = failed ? "🎵 Cover Crazy — MISSED!" : blackout ? "🎵 Cover Crazy — BLACKOUT!" : "🎵 Cover Crazy — BINGO!";
   return [header, "", ...rows, "", `Picks: ${picks} · Time: ${formatElapsed(elapsedMs)}`, url].join("\n");
 }
 
@@ -322,7 +325,7 @@ export default function BoardPage() {
   const [searchError, setSearchError] = useState("");
   const [albums, setAlbums] = useState<FilledAlbum[]>([]);
 
-  const { user: authUser } = useAuth();
+  const { user: authUser, ready: authReady } = useAuth();
   const [friends, setFriends] = useState<Friend[]>([]);
   const [selectedFriendUid, setSelectedFriendUid] = useState("");
   const [inviteStatus, setInviteStatus] = useState("");
@@ -335,11 +338,12 @@ export default function BoardPage() {
   const [nameDraft, setNameDraft] = useState("");
 
   const player: Player | null = useMemo(() => {
+    if (!authReady) return null;
     if (authUser) {
       return { id: authUser.uid, name: authUser.displayName, color: authUser.color };
     }
     return anonPlayer;
-  }, [authUser, anonPlayer]);
+  }, [authReady, authUser, anonPlayer]);
 
   const [liveConnected, setLiveConnected] = useState(false);
 
@@ -349,15 +353,18 @@ export default function BoardPage() {
   const [showWinBanner, setShowWinBanner] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
+  const [soloMisses, setSoloMisses] = useState(0);
+  const [soloFailed, setSoloFailed] = useState(false);
   const [dailyStreak, setDailyStreak] = useState<number | null>(null);
   const celebratedRef = useRef(false);
 
   // Load player identity on mount.
   useEffect(() => {
+    if (!authReady || authUser) return;
     const p = getPlayer();
     setAnonPlayer(p);
     setNameDraft(p.name);
-  }, []);
+  }, [authReady, authUser]);
 
   const squares = useMemo(() => {
     if (!board) return [];
@@ -366,6 +373,8 @@ export default function BoardPage() {
 
   const isShared = board?.mode === "shared" || board?.mode === "party";
   const isParty = board?.mode === "party";
+  const isSolo = board?.mode === "solo";
+  const isHost = !!(isParty && player && board?.ownerId && board.ownerId === player.id);
   const displaySquares = useMemo(
     () => toDisplaySquares(squares, boardId, player?.id ?? null, !!isParty, board?.partyMarks ?? {}),
     [squares, boardId, player?.id, isParty, board?.partyMarks]
@@ -379,6 +388,8 @@ export default function BoardPage() {
   }, [winningLines]);
 
   const hasBingo = winningLines.length > 0;
+  const soloMissesLeft = Math.max(0, SOLO_MAX_MISSES - soloMisses);
+  const soloLocked = !!(isSolo && (hasBingo || soloFailed));
   const blackout = useMemo(() => isBlackout(displaySquares), [displaySquares]);
   const pickCount = useMemo(
     () => displaySquares.filter((s) => s.displayPosition !== FREE_POSITION && s.fill).length,
@@ -425,6 +436,7 @@ export default function BoardPage() {
       mode: b.mode,
       packKey: (b.packKey ?? "classic") as PackKey,
       dailyDate: typeof b.dailyDate === "string" ? b.dailyDate : null,
+      ownerId: typeof b.ownerId === "string" ? b.ownerId : null,
       roomCode: typeof b.roomCode === "string" ? b.roomCode : null,
       partyStatus: typeof b.partyStatus === "string" ? b.partyStatus : null,
       partyPlayers: Array.isArray(b.partyPlayers) ? (b.partyPlayers as PartyPlayer[]) : [],
@@ -526,6 +538,19 @@ export default function BoardPage() {
   }, [boardId]);
 
   useEffect(() => {
+    if (!board || board.mode !== "solo") return;
+    try {
+      const raw = localStorage.getItem(`cc:solo:${board.id}`);
+      const data = raw ? (JSON.parse(raw) as { misses?: number; failed?: boolean }) : null;
+      setSoloMisses(typeof data?.misses === "number" ? data.misses : 0);
+      setSoloFailed(!!data?.failed);
+    } catch {
+      setSoloMisses(0);
+      setSoloFailed(false);
+    }
+  }, [board?.id, board?.mode]);
+
+  useEffect(() => {
     if (!authUser || !isShared) {
       setFriends([]);
       setSelectedFriendUid("");
@@ -541,7 +566,7 @@ export default function BoardPage() {
   }, [authUser?.uid, isShared]);
 
   useEffect(() => {
-    if (!isParty || !board?.roomCode || !player) return;
+    if (!authReady || !isParty || !board?.roomCode || !player) return;
     const joinKey = `${board.roomCode}:${player.id}:${player.name}`;
     if (joinedPartyRef.current === joinKey) return;
     joinedPartyRef.current = joinKey;
@@ -560,7 +585,7 @@ export default function BoardPage() {
         joinedPartyRef.current = "";
         setPartyJoinStatus(e instanceof Error ? e.message : "Failed to join party.");
       });
-  }, [isParty, board?.roomCode, player]);
+  }, [authReady, isParty, board?.roomCode, player]);
 
   // Real-time subscription for shared boards.
   useEffect(() => {
@@ -679,6 +704,10 @@ export default function BoardPage() {
 
   function openPicker(position: number) {
     if (position === FREE_POSITION) return;
+    if (soloLocked) {
+      setErrorMsg(soloFailed ? "Solo puzzle failed. Start a new board to try again." : "Solo puzzle complete.");
+      return;
+    }
     if (isParty && board?.partySpotlight?.position !== position) {
       setPartyActionStatus("Wait for this prompt to be called before marking it.");
       return;
@@ -698,8 +727,32 @@ export default function BoardPage() {
     setSearchError("");
   }
 
+  function recordSoloMiss(reason: string) {
+    if (!board || board.mode !== "solo") {
+      setSearchError(reason);
+      return;
+    }
+
+    const nextMisses = Math.min(SOLO_MAX_MISSES, soloMisses + 1);
+    const failed = nextMisses >= SOLO_MAX_MISSES && !hasBingo;
+    setSoloMisses(nextMisses);
+    setSoloFailed(failed);
+    setSearchError(`${reason} (${SOLO_MAX_MISSES - nextMisses} misses left)`);
+
+    try {
+      localStorage.setItem(`cc:solo:${board.id}`, JSON.stringify({ misses: nextMisses, failed }));
+    } catch {
+      // ignore local persistence failures
+    }
+
+    if (failed) {
+      closePicker();
+      setShowWinBanner(true);
+    }
+  }
+
   async function clearSquare(position: number) {
-    if (!board || position === FREE_POSITION) return;
+    if (!board || position === FREE_POSITION || board.mode === "solo") return;
 
     setBoard({
       ...board,
@@ -754,13 +807,13 @@ export default function BoardPage() {
         player &&
         Object.values(board.partyMarks[player.id] ?? {}).some((fill) => fill.id === (details as any).id);
       if (alreadyUsed || partyAlreadyUsed) {
-        setSearchError("This album is already placed on another square.");
+        recordSoloMiss("This album is already placed on another square.");
         return;
       }
 
       const rule: RuleResult = validatePrompt(sq.promptKey, details);
       if (!rule.ok) {
-        setSearchError(rule.reason);
+        recordSoloMiss(rule.reason);
         return;
       }
 
@@ -784,7 +837,6 @@ export default function BoardPage() {
               [String(activePos)]: fill,
             },
           },
-          partySpotlight: null,
         });
       } else {
         setBoard({
@@ -811,6 +863,7 @@ export default function BoardPage() {
       elapsedMs,
       url,
       blackout,
+      failed: soloFailed,
     });
     try {
       await navigator.clipboard.writeText(text);
@@ -838,10 +891,14 @@ export default function BoardPage() {
 
   async function startSpotlight() {
     if (!player) return;
+    if (!isHost) {
+      setPartyActionStatus("Only the host can call the next prompt.");
+      return;
+    }
     try {
-      setPartyActionStatus("Starting spotlight...");
+      setPartyActionStatus("Calling next prompt...");
       await patchPartyAction({ action: "spotlight", player });
-      setPartyActionStatus("Spotlight is live.");
+      setPartyActionStatus("Prompt called.");
       await loadBoard();
     } catch (e: unknown) {
       setPartyActionStatus(e instanceof Error ? e.message : "Failed to start spotlight.");
@@ -970,7 +1027,7 @@ export default function BoardPage() {
         </button>
         <h1 style={{ fontSize: 40, fontWeight: 900, margin: 0 }}>Cover Crazy</h1>
         <span style={{ opacity: 0.65, fontSize: 14 }}>
-          {board.id.slice(0, 8)}… · {board.mode} · {packDef.name}
+          {board.roomCode ?? board.id.slice(0, 8)} · {board.mode} · {packDef.name}
         </span>
 
         {isShared ? (
@@ -1077,19 +1134,24 @@ export default function BoardPage() {
           <span style={{ opacity: 0.85 }}>
             Time: <strong>{formatElapsed(elapsedMs)}</strong>
           </span>
+          {isSolo ? (
+            <span style={{ opacity: 0.85 }}>
+              Misses: <strong>{soloMisses}/{SOLO_MAX_MISSES}</strong>
+            </span>
+          ) : null}
           <span
             style={{
               padding: "4px 10px",
               borderRadius: 999,
               border: "1px solid rgba(255,255,255,0.18)",
-              background: hasBingo ? "rgba(80,230,150,0.18)" : "rgba(255,255,255,0.06)",
-              color: hasBingo ? "#7cf3a8" : "white",
+              background: soloFailed ? "rgba(255,107,107,0.16)" : hasBingo ? "rgba(80,230,150,0.18)" : "rgba(255,255,255,0.06)",
+              color: soloFailed ? "#ff8b8b" : hasBingo ? "#7cf3a8" : "white",
               fontWeight: 800,
             }}
           >
-            {blackout ? "Blackout!" : hasBingo ? `${winningLines.length}× Bingo` : "In progress"}
+            {soloFailed ? "Missed" : blackout ? "Blackout!" : hasBingo ? `${winningLines.length}× Bingo` : "In progress"}
           </span>
-          {hasBingo ? (
+          {hasBingo || soloFailed ? (
             <button
               onClick={copyShare}
               style={{
@@ -1110,6 +1172,30 @@ export default function BoardPage() {
 
       {errorMsg ? <div style={{ marginTop: 12, color: "#ff6b6b" }}>{errorMsg}</div> : null}
 
+      {isSolo ? (
+        <section
+          style={{
+            marginTop: 16,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+            padding: 12,
+            borderRadius: 14,
+            border: soloFailed ? "1px solid rgba(255,107,107,0.38)" : "1px solid rgba(255,255,255,0.12)",
+            background: soloFailed ? "rgba(255,107,107,0.08)" : "rgba(255,255,255,0.04)",
+          }}
+        >
+          <span style={{ fontSize: 13, fontWeight: 900 }}>Solo puzzle</span>
+          <span style={{ fontSize: 13, opacity: 0.78 }}>
+            Fill a bingo line before {SOLO_MAX_MISSES} invalid album picks.
+          </span>
+          <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 900, color: soloMissesLeft <= 2 ? "#ffd166" : "#7cf3a8" }}>
+            {soloMissesLeft} misses left
+          </span>
+        </section>
+      ) : null}
+
       {isParty ? (
         <section
           style={{
@@ -1127,11 +1213,16 @@ export default function BoardPage() {
               padding: 14,
             }}
           >
-            <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 800, textTransform: "uppercase" }}>Party code</div>
+            <div style={{ fontSize: 12, opacity: 0.7, fontWeight: 800, textTransform: "uppercase" }}>Board code</div>
             <div style={{ marginTop: 6, fontSize: 34, fontWeight: 950, letterSpacing: 3 }}>
               {board.roomCode ?? "------"}
             </div>
             <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>{partyJoinStatus || "Lobby is live"}</div>
+            {isHost ? (
+              <div style={{ marginTop: 6, fontSize: 12, color: "#7cf3a8", fontWeight: 800 }}>You are the host</div>
+            ) : (
+              <div style={{ marginTop: 6, fontSize: 12, opacity: 0.72 }}>Waiting for the host to call prompts</div>
+            )}
             <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 onClick={copyPartyCode}
@@ -1149,18 +1240,19 @@ export default function BoardPage() {
               </button>
               <button
                 onClick={startSpotlight}
-                disabled={!player}
+                disabled={!player || !isHost}
                 style={{
                   padding: "8px 12px",
                   borderRadius: 10,
                   border: "1px solid rgba(255,209,102,0.55)",
                   background: "rgba(255,209,102,0.14)",
                   color: "white",
-                  cursor: player ? "pointer" : "not-allowed",
+                  cursor: player && isHost ? "pointer" : "not-allowed",
                   fontWeight: 800,
+                  opacity: isHost ? 1 : 0.58,
                 }}
               >
-                Spotlight
+                Call prompt
               </button>
             </div>
             {board.partySpotlight ? (
@@ -1175,7 +1267,7 @@ export default function BoardPage() {
                   lineHeight: 1.35,
                 }}
               >
-                <strong>Bonus target:</strong> square {board.partySpotlight.position + 1} · {board.partySpotlight.promptText}
+                <strong>Called prompt:</strong> {board.partySpotlight.promptText}
               </div>
             ) : null}
             {partyActionStatus ? <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>{partyActionStatus}</div> : null}
@@ -1486,7 +1578,7 @@ export default function BoardPage() {
                 color: "white",
                 padding: 14,
                 minHeight: 130,
-                cursor: filled ? "default" : isParty && !isSpotlight ? "not-allowed" : "pointer",
+                cursor: filled || soloLocked ? "default" : isParty && !isSpotlight ? "not-allowed" : "pointer",
                 overflow: "hidden",
                 animation: inWin ? "cc-glow 1.6s ease-in-out infinite" : undefined,
               }}
@@ -1595,6 +1687,10 @@ export default function BoardPage() {
                           ? isSpotlight
                             ? "Called now. Submit an album to mark it."
                             : "Waiting to be called"
+                          : soloLocked
+                          ? soloFailed
+                            ? "Out of misses"
+                            : "Puzzle complete"
                           : "Click to add an album"}
                       </div>
                     ) : (
@@ -1608,7 +1704,7 @@ export default function BoardPage() {
                         ) : null}
 
                         <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          {(!isShared || isMine) ? (
+                          {!isSolo && (!isShared || isMine) ? (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1716,13 +1812,15 @@ export default function BoardPage() {
             }}
           >
             <div style={{ fontSize: 14, opacity: 0.75, letterSpacing: 2 }}>
-              {blackout ? "FULL BOARD" : "YOU GOT IT"}
+              {soloFailed ? "SOLO RESULT" : blackout ? "FULL BOARD" : "YOU GOT IT"}
             </div>
-            <div style={{ fontSize: 48, fontWeight: 900, marginTop: 6, color: "#7cf3a8" }}>
-              {blackout ? "BLACKOUT!" : "BINGO!"}
+            <div style={{ fontSize: 48, fontWeight: 900, marginTop: 6, color: soloFailed ? "#ff8b8b" : "#7cf3a8" }}>
+              {soloFailed ? "MISSED" : blackout ? "BLACKOUT!" : "BINGO!"}
             </div>
             <div style={{ marginTop: 10, fontSize: 15, opacity: 0.85 }}>
-              {winningLines.length}× line · {pickCount} picks · {formatElapsed(elapsedMs)}
+              {soloFailed
+                ? `${pickCount} picks · ${soloMisses}/${SOLO_MAX_MISSES} misses`
+                : `${winningLines.length}× line · ${pickCount} picks · ${formatElapsed(elapsedMs)}`}
             </div>
 
             {dailyStreak !== null ? (
@@ -1758,7 +1856,7 @@ export default function BoardPage() {
               >
                 {shareCopied ? "Copied!" : "Share result"}
               </button>
-              {!blackout ? (
+              {!blackout && !soloFailed ? (
                 <button
                   onClick={() => setShowWinBanner(false)}
                   style={{

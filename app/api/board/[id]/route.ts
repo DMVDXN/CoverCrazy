@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
-import { firestore } from "@/lib/firebaseAdmin";
+import { adminAuth, firestore } from "@/lib/firebaseAdmin";
 import { getPromptsForPack, normalizePackKey } from "@/lib/packs";
 
 type FilledBy = {
@@ -31,6 +31,20 @@ type PromptDef = { key: string; text: string };
 
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+}
+
+async function requireUid(req: Request): Promise<string | NextResponse> {
+  const authHeader = req.headers.get("authorization") || req.headers.get("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return NextResponse.json({ error: "Missing bearer token." }, { status: 401 });
+  }
+
+  try {
+    const decoded = await adminAuth().verifyIdToken(authHeader.slice("Bearer ".length).trim());
+    return decoded.uid;
+  } catch {
+    return NextResponse.json({ error: "Invalid token." }, { status: 401 });
+  }
 }
 
 function mulberry32(seed: number) {
@@ -188,10 +202,13 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
       const squares = ensureSquaresComplete(board);
 
       if (action === "spotlight") {
+        const player = normalizePlayer(body?.player);
+        if (board.ownerId && player?.id !== board.ownerId) {
+          return { status: 403, body: { error: "Only the host can call prompts." } };
+        }
         const openSquares = squares.filter((s) => s.position !== 12 && !s.fill);
         if (openSquares.length === 0) return { status: 400, body: { error: "No open squares to spotlight." } };
         const picked = openSquares[Math.floor(Math.random() * openSquares.length)];
-        const player = normalizePlayer(body?.player);
         const spotlight = {
           position: picked.position,
           promptText: picked.promptText,
@@ -249,7 +266,6 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
 
           const updates: Record<string, unknown> = {
             partyMarks: marks,
-            partySpotlight: null,
             players: FieldValue.arrayUnion(enriched.filledBy.id),
             updatedAt: FieldValue.serverTimestamp(),
           };
@@ -344,5 +360,32 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id?: string }
     return NextResponse.json(result.body, { status: result.status });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to update square." }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: Request, ctx: { params: Promise<{ id?: string }> }) {
+  try {
+    const uid = await requireUid(req);
+    if (typeof uid !== "string") return uid;
+
+    const { id } = await ctx.params;
+    if (!id) return NextResponse.json({ error: "Missing board id." }, { status: 400 });
+    if (!isUuid(id)) return NextResponse.json({ error: "Invalid board id." }, { status: 400 });
+
+    const db = firestore();
+    const ref = db.collection("boards").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) return NextResponse.json({ error: "Board not found." }, { status: 404 });
+
+    const board = snap.data() as { ownerId?: string | null };
+    if (board.ownerId !== uid) {
+      return NextResponse.json({ error: "Only the board owner can delete this board." }, { status: 403 });
+    }
+
+    await ref.delete();
+    return NextResponse.json({ ok: true });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : "Failed to delete board.";
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

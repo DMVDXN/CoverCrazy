@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth";
 import {
   acceptFriendRequest,
   declineFriendRequest,
+  deleteOwnedBoard,
   dismissBoardInvite,
   fetchBoardInvites,
   fetchDailyLeaderboard,
@@ -68,6 +69,7 @@ export default function ProfilePage() {
   const [addEmail, setAddEmail] = useState("");
   const [addBusy, setAddBusy] = useState(false);
   const [addMsg, setAddMsg] = useState("");
+  const [deletingBoardId, setDeletingBoardId] = useState("");
 
   const today = todayKeyUTC();
 
@@ -179,6 +181,23 @@ export default function ProfilePage() {
       setBoardInvites((items) => items.filter((item) => item.boardId !== boardId));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to dismiss board invite.");
+    }
+  }
+
+  async function onDeleteBoard(boardId: string) {
+    if (!user || deletingBoardId) return;
+    const ok = window.confirm("Delete this board? This cannot be undone.");
+    if (!ok) return;
+
+    setDeletingBoardId(boardId);
+    setError("");
+    try {
+      await deleteOwnedBoard(boardId);
+      setBoards((items) => items.filter((item) => item.id !== boardId));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to delete board.");
+    } finally {
+      setDeletingBoardId("");
     }
   }
 
@@ -487,9 +506,14 @@ export default function ProfilePage() {
         ) : (
           <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
             {boards.map((b) => (
-              <button
+              <div
                 key={b.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => router.push(`/board/${b.id}`)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") router.push(`/board/${b.id}`);
+                }}
                 style={boardRowStyle}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
@@ -506,6 +530,9 @@ export default function ProfilePage() {
                   >
                     {b.mode}
                   </span>
+                  {b.roomCode ? (
+                    <span style={{ opacity: 0.9, fontSize: 13, fontWeight: 800 }}>{b.roomCode}</span>
+                  ) : null}
                   <span style={{ opacity: 0.85, fontSize: 13 }}>{b.packKey}</span>
                   {b.dailyDate ? (
                     <span style={{ opacity: 0.7, fontSize: 12 }}>· {b.dailyDate}</span>
@@ -515,7 +542,28 @@ export default function ProfilePage() {
                   <span>{b.squaresFilled}/24 filled</span>
                   <span>{formatDate(b.createdAt)}</span>
                 </div>
-              </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteBoard(b.id);
+                  }}
+                  disabled={deletingBoardId === b.id}
+                  style={{
+                    marginLeft: 10,
+                    padding: "7px 10px",
+                    borderRadius: 9,
+                    border: "1px solid rgba(255,107,107,0.45)",
+                    background: "rgba(255,107,107,0.12)",
+                    color: "white",
+                    cursor: deletingBoardId === b.id ? "not-allowed" : "pointer",
+                    fontWeight: 800,
+                    fontSize: 12,
+                    opacity: deletingBoardId === b.id ? 0.6 : 1,
+                  }}
+                >
+                  {deletingBoardId === b.id ? "Deleting..." : "Delete"}
+                </button>
+              </div>
             ))}
           </div>
         )}

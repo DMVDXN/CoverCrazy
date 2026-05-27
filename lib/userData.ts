@@ -35,6 +35,7 @@ export type BingoResult = {
 
 export type BoardListEntry = {
   id: string;
+  roomCode: string | null;
   mode: string;
   packKey: string;
   dailyDate: string | null;
@@ -260,6 +261,16 @@ export async function dismissBoardInvite(boardId: string): Promise<void> {
   if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : "Failed to dismiss board invite.");
 }
 
+export async function deleteOwnedBoard(boardId: string): Promise<void> {
+  const idToken = await currentIdToken();
+  const res = await fetch(`/api/board/${encodeURIComponent(boardId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data?.error === "string" ? data.error : "Failed to delete board.");
+}
+
 export async function recordDailyResult(
   uid: string,
   date: string,
@@ -355,6 +366,7 @@ export async function fetchOwnedBoards(uid: string, max = 30): Promise<BoardList
     const data = d.data() as {
       id?: string;
       mode?: string;
+      roomCode?: string | null;
       packKey?: string;
       dailyDate?: string | null;
       createdAt?: unknown;
@@ -366,6 +378,7 @@ export async function fetchOwnedBoards(uid: string, max = 30): Promise<BoardList
       : 0;
     return {
       id: data.id ?? d.id,
+      roomCode: data.roomCode ?? null,
       mode: data.mode ?? "solo",
       packKey: data.packKey ?? "classic",
       dailyDate: data.dailyDate ?? null,
